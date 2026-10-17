@@ -45,6 +45,8 @@ executable vestigia
   main-is:          Main.hs
   ghc-options:
       -Wall -Werror -rtsopts
+  c-sources:
+      cbits/norandom.c
   other-modules:
       Paths_vestigia
   autogen-modules:

@@ -1,3 +1,4 @@
+{-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- |
@@ -14,6 +15,8 @@ module Main (
   ) where
 
 import Control.Exception (IOException, try)
+import Control.Monad (when)
+import Foreign.C.Types (CInt(..))
 import qualified Data.ByteString as BS
 import Data.Version (showVersion)
 import qualified Data.Text as T
@@ -34,6 +37,11 @@ import Vestigia.Json (encode)
 import Vestigia.Memcheck (readMemcheck)
 import Vestigia.Symbol (symbolize)
 import Vestigia.Trace (trace, traceJson, traceSummary)
+
+-- address-space randomisation off, for this process and its
+-- children; nonzero where it cannot be (cbits/norandom.c)
+foreign import ccall unsafe "vestigia_no_randomize"
+  c_noRandomize :: IO CInt
 
 data Opts = Opts {
     oValgrind :: !(Maybe FilePath)
@@ -188,6 +196,11 @@ tool opt var dflt = do
 record :: Opts -> FilePath -> [String] -> IO ()
 record o prog progArgs = do
   dump <- maybe (usage "record: --dump FILE is needed") pure (oDump o)
+  -- runs to be compared must lay memory out alike
+  fixed <- c_noRandomize
+  when (fixed /= 0) $ hPutStrLn stderr
+    "vestigia: address randomisation is still on; runs may differ \
+    \in layout, and so everywhere"
   qemu <- tool (oQemu o) "VESTIGIA_QEMU" "qemu-x86_64"
   plugin <- tool (oPlugin o) "VESTIGIA_PLUGIN" "libvestigia-qemu.so"
   r <- try (withCreateProcess

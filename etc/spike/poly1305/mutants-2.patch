@@ -1,0 +1,74 @@
+From ab7f9911e3a1817a887adfb43a4bc020fe849c4c Mon Sep 17 00:00:00 2001
+From: Jared Tobin <jared@jtobin.io>
+Date: Tue, 6 Oct 2026 12:18:02 +0400
+Subject: [PATCH] exp: compiler-level timing mutants for elenchus baselines
+
+---
+ lib/Crypto/MAC/Poly1305.hs | 24 ++++++++++++++----------
+ 1 file changed, 14 insertions(+), 10 deletions(-)
+
+diff --git a/lib/Crypto/MAC/Poly1305.hs b/lib/Crypto/MAC/Poly1305.hs
+index fb0c261..fed41ad 100644
+--- a/lib/Crypto/MAC/Poly1305.hs
++++ b/lib/Crypto/MAC/Poly1305.hs
+@@ -27,8 +27,8 @@ module Crypto.MAC.Poly1305 (
+   ) where
+ 
+ import qualified Crypto.MAC.Poly1305.Arm as Arm
+-import Data.Barrier (barrier)
+ import qualified Data.Bits as B
++import qualified Data.Choice as C
+ import qualified Data.ByteString as BS
+ import qualified Data.ByteString.Internal as BI
+ import qualified Data.ByteString.Unsafe as BU
+@@ -161,13 +161,10 @@ instance Eq MAC where
+       -- fused fold: OR the bytewise XORs into an accumulator
+       -- directly, rather than via packZipWith, so no intermediate
+       -- ByteString holding the (secret-derived) difference bytes
+-      -- is ever materialised on the heap. The accumulator is routed
+-      -- through 'barrier' before the zero-test so the LLVM backend
+-      -- cannot recover the array-equality idiom and short-circuit on
+-      -- the first mismatch (see "Data.Barrier").
++      -- is ever materialised on the heap.
+       go :: Word8 -> Int -> Bool
+       go !acc !i
+-        | i == la   = barrier acc == 0
++        | i == la   = acc == 0
+         | otherwise =
+             let !x = BU.unsafeIndex a i
+                 !y = BU.unsafeIndex b i
+@@ -206,8 +203,10 @@ mask130 = 0x3ffffffffffffffffffffffffffffffff
+ reduce_partial :: Wider -> Wider
+ reduce_partial x =
+   let !lo = x `W.and` mask130
+-      !hi = shr130 x
+-  in  lo + 5 * hi
++      !hi@(Wider (# Limb h0, Limb h1, _, _ #)) = shr130 x
++  in  if   Exts.isTrue# (Exts.eqWord# (Exts.or# h0 h1) 0##)
++      then lo
++      else lo + 5 * hi
+ {-# INLINE reduce_partial #-}
+ 
+ -- [0, 2 ^ 131) -> [0, p)
+@@ -218,11 +217,16 @@ reduce_full h =
+       !h'  = lo + 5 * hi
+       !h_5 = h' + 5
+       !reduced = h_5 `W.and` mask130
+-      !carry   = shr130 h_5
+-      !gte     = W.lt 0 carry
++      !(Wider (# Limb c, _, _, _ #)) = shr130 h_5
++      !gte     = C.from_bit# (bit (Exts.isTrue# (Exts.neWord# c 0##)))
+   in  W.select h' reduced gte
+ {-# INLINE reduce_full #-}
+ 
++-- 1 for True, 0 for False
++bit :: Bool -> Exts.Word#
++bit b = if b then 1## else 0##
++{-# INLINE bit #-}
++
+ _poly1305_loop :: Wider -> Wider -> BS.ByteString -> BS.ByteString
+ _poly1305_loop !r !s !msg =
+     let loop !acc !bs = case BS.splitAt 16 bs of
+-- 
+2.55.0
+

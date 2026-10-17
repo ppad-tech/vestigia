@@ -54,3 +54,30 @@ The tool earns its place only if it reproduces known results:
   written by a small encoder of our own.
 - valgrind enters through nix as a tool. It does not run on Darwin;
   traces there need a Linux cell.
+
+## Outcome
+
+Two instruments, not one. memcheck taint (`vestigia run`) sees any
+dependence of a branch or address on a secret's data, even where
+the outcome never varies, but not through control flow: after a
+secret-dependent branch, what the branch builds from public data is
+defined. Differential traces under a QEMU plugin (`vestigia record`
+and `diff`) see what control does to data as well, on any ISA QEMU
+runs, but only what the chosen secrets actually varied, and need
+runs laid out alike (randomisation off). Neither needs a model.
+
+- Penumbra (`etc/spike/penumbra/RESULTS.md`): elenchus's 79 leaks
+  fall in thirteen functions, each with a vestigia site in it and
+  its source line; one to two seconds per root.
+- ppad-poly1305 (`etc/spike/poly1305/RESULTS.md`): every planted
+  leak found, no decoy flagged; release clean but for the harness's
+  use of the comparison result. One leak (an early-exit compare)
+  needs designed inputs for the differential instrument.
+- ppad-secp256k1 (`etc/spike/secp256k1/RESULTS.md`): S1 found; S2
+  and S3 absent from x86's machine code, verified by its branches;
+  release clean but for validation and declassified outputs.
+
+Open: aarch64 traces (an aarch64-linux build of the harness for the
+differential instrument, a native host for memcheck); line tables
+for GHC builds; the explain step, which separates a leak from a
+declassified result (a tag comparison, a validity check).
