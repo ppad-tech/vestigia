@@ -1,0 +1,8 @@
+# Changelog
+
+- 0.1.0 (unreleased)
+  * Initial version: `vestigia run` runs a harness under memcheck
+    with the bytes it marked secret made undefined, and reports each
+    branch and address computed from them (vestigia/trace-v1);
+    `vestigia read` reports from memcheck's XML; `vestigia.h` holds
+    the harness's two marks.
