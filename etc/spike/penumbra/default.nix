@@ -27,6 +27,7 @@ let
   harnessFor = lib: pkgs.runCommandCC "penumbra-vestigia-harness" { } ''
     mkdir -p $out/bin
     cc -O2 -g -o $out/bin/harness ${./harness.c} \
+      ${vestigia.packages.${system}.include}/include/vestigia.c \
       -I${vestigia.packages.${system}.include}/include \
       -I${vestigia.lib.${system}.valgrindDev}/include \
       -L${lib}/lib -lpenumbra_audit -Wl,-rpath,${lib}/lib

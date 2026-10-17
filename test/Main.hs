@@ -94,6 +94,19 @@ traceTests = testGroup "trace"
       fmap meKind (trUnrelated tr) @?= [ "UninitValue" ]
       fmap meKind (trFaults tr) @?= [ "InvalidRead" ]
 
+  , testCase "a frame is named by its address in its object" $ do
+      os <- either assertFailure pure
+        (readObjects "4000000 /nix/store/x-lib/lib/liba.so\n\
+                     \0 /nix/store/y-h/bin/harness\n")
+      let f o i = Frame i (Just o) Nothing Nothing Nothing
+      objectOffset os (f "/nix/store/x-lib/lib/liba.so" 0x4001234)
+        @?= Just 0x1234
+      -- the same file reached by another path
+      objectOffset os (f "/other/liba.so" 0x4000010) @?= Just 0x10
+      objectOffset os (f "/nix/store/y-h/bin/harness" 0x401000)
+        @?= Just 0x401000
+      objectOffset os (f "/lib/libc.so.6" 0x7000) @?= Nothing
+
   , testCase "one site per instruction, whatever called it" $ do
       tr <- trace <$> either assertFailure pure (readMemcheck twoCallers)
       fmap (\s -> (frIp (siFrame s), siCount s, length (siStacks s)))

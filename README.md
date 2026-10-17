@@ -41,10 +41,13 @@ penumbra_audit_public_key(ws);
 vestigia_public(ws + 32, 32);     /* the public key it derives */
 ```
 
+The harness compiles `include/vestigia.c` beside it, which defines
+the marks; a harness that reaches them through a foreign function
+interface (a Haskell `foreign import ccall`) compiles the same file.
 Outside valgrind the marks are no-ops, so the same harness can be
-timed by censor unchanged. A harness that reaches the marks through
-a foreign function interface (a Haskell `foreign import ccall`)
-compiles `include/vestigia-ffi.c`, which defines them as functions.
+timed by censor unchanged. On Linux the first secret mark also
+writes where the loader put each object, for `vestigia run` to name
+every site by its object and its address in it.
 
 ### Taint: `vestigia run`
 

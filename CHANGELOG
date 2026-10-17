@@ -2,8 +2,9 @@
 
 - 0.1.0 (unreleased)
   * Initial version, with two instruments over a harness that marks
-    its secret (`vestigia.h`, or `vestigia-ffi.c` through a foreign
-    function interface):
+    its secret (`vestigia.h`, defined by `vestigia.c`, which serves
+    a foreign function interface too and records where the loader
+    put each object):
     * `vestigia run`: the harness under memcheck with the secret's
       bytes undefined, reporting each branch and address computed
       from them (vestigia/trace-v1); `vestigia read` reports from

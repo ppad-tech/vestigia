@@ -22,10 +22,11 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
 import qualified Data.Text.IO as TIO
 import System.Directory (getTemporaryDirectory, removeFile)
-import System.Environment (getArgs, lookupEnv)
+import System.Environment (getArgs, getEnvironment, lookupEnv)
 import System.Exit (ExitCode(..), exitWith)
 import System.IO (hClose, hPutStrLn, openTempFile, stderr)
 import System.Process (proc, waitForProcess, withCreateProcess)
+import qualified System.Process as P
 
 import Paths_vestigia (version)
 import Vestigia.Diff
@@ -35,7 +36,8 @@ import Vestigia.Json (encode)
 import Vestigia.Layout (fixLayout)
 import Vestigia.Memcheck (readMemcheck)
 import Vestigia.Symbol (symbolize)
-import Vestigia.Trace (trace, traceJson, traceSummary)
+import Vestigia.Trace
+  (readObjects, trace, traceJson, traceSummary, withObjects)
 
 data Opts = Opts {
     oValgrind :: !(Maybe FilePath)
@@ -151,8 +153,17 @@ run o prog progArgs = do
       (p, h) <- openTempFile tmp "vestigia.xml"
       hClose h
       pure (p, True)
+  -- where the harness's loader put its objects, which the
+  -- harness's first mark writes (vestigia.h)
+  tmp <- getTemporaryDirectory
+  (objects, oh) <- openTempFile tmp "vestigia-objects"
+  hClose oh
+  environment <- getEnvironment
   r <- try (withCreateProcess
          (proc valgrind (memcheckArgs xml <> (prog : progArgs)))
+           { P.env = Just (("VESTIGIA_OBJECTS", objects)
+                         : filter ((/= "VESTIGIA_OBJECTS") . fst)
+                             environment) }
          (\_ _ _ ph -> waitForProcess ph))
   code <- case r of
     Left e -> do
@@ -160,7 +171,14 @@ run o prog progArgs = do
         <> show (e :: IOException))
       exitWith (ExitFailure 2)
     Right c -> pure c
-  report o (Just (exitCode code)) xml
+  otext <- TIO.readFile objects
+  os <- case readObjects otext of
+    Left e -> do
+      hPutStrLn stderr ("vestigia: " <> objects <> ": " <> e)
+      exitWith (ExitFailure 2)
+    Right v -> pure v
+  removeFile objects
+  report o (Just (exitCode code)) os xml
   if temporary then removeFile xml else pure ()
   where
     exitCode c = case c of
@@ -168,10 +186,10 @@ run o prog progArgs = do
       ExitFailure n -> n
 
 readXml :: Opts -> FilePath -> IO ()
-readXml o xml = report o Nothing xml
+readXml o xml = report o Nothing [] xml
 
-report :: Opts -> Maybe Int -> FilePath -> IO ()
-report o exit xml = do
+report :: Opts -> Maybe Int -> [(Integer, T.Text)] -> FilePath -> IO ()
+report o exit os xml = do
   bytes <- BS.readFile xml
   let txt = TE.decodeUtf8With TEE.lenientDecode bytes
   case readMemcheck txt of
@@ -179,7 +197,7 @@ report o exit xml = do
       hPutStrLn stderr ("vestigia: " <> xml <> ": " <> e)
       exitWith (ExitFailure 2)
     Right mc -> do
-      let tr = trace mc
+      let tr = withObjects os (trace mc)
           doc = encode
             (traceJson (T.pack (showVersion version)) exit tr)
       maybe (TIO.putStr doc) (\p -> TIO.writeFile p doc) (oOut o)

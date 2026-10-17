@@ -28,10 +28,10 @@ import Foreign.Ptr (Ptr, castPtr)
 import Numeric (readHex)
 import System.Environment (getArgs)
 
-foreign import ccall unsafe "vestigia_secret_c"
+foreign import ccall unsafe "vestigia_secret"
   c_secret :: Ptr () -> CSize -> IO ()
 
-foreign import ccall unsafe "vestigia_public_c"
+foreign import ccall unsafe "vestigia_public"
   c_public :: Ptr () -> CSize -> IO ()
 
 mark :: (Ptr () -> CSize -> IO ()) -> BS.ByteString -> IO ()

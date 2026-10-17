@@ -12,20 +12,16 @@
  * not reported. Outside valgrind both are no-ops.
  *
  * Mark a secret after writing it and before the call; mark the
- * outputs after the call.
+ * outputs after the call. A harness compiles vestigia.c beside it,
+ * which defines both (and serves a foreign function interface as
+ * well as C).
  */
 #ifndef VESTIGIA_H
 #define VESTIGIA_H
 
 #include <stddef.h>
-#include <valgrind/memcheck.h>
 
-static inline void vestigia_secret(void *p, size_t n) {
-  (void)VALGRIND_MAKE_MEM_UNDEFINED(p, n);
-}
-
-static inline void vestigia_public(void *p, size_t n) {
-  (void)VALGRIND_MAKE_MEM_DEFINED(p, n);
-}
+void vestigia_secret(void *p, size_t n);
+void vestigia_public(void *p, size_t n);
 
 #endif

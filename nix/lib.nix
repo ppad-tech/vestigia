@@ -45,7 +45,7 @@ let
   include = pkgs.runCommand "vestigia-include" { } ''
     mkdir -p $out/include
     cp ${src}/include/vestigia.h $out/include/vestigia.h
-    cp ${src}/include/vestigia-ffi.c $out/include/vestigia-ffi.c
+    cp ${src}/include/vestigia.c $out/include/vestigia.c
   '';
 
   # the command, with the valgrind it was built against baked in

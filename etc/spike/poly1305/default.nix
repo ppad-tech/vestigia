@@ -31,7 +31,7 @@ let
       } ''
         mkdir -p $out/bin build
         cp ${./Harness.hs} build/Harness.hs
-        cp ${vestigia.packages.${system}.include}/include/vestigia-ffi.c build/marks.c
+        cp ${vestigia.packages.${system}.include}/include/vestigia.c build/marks.c
         cd build
         # a small address-space reservation, since memcheck pays for
         # the runtime's default terabyte on every run, and no

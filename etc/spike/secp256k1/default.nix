@@ -40,7 +40,7 @@ let
       } ''
         mkdir -p $out/bin build
         cp ${./Harness.hs} build/Harness.hs
-        cp ${vestigia.packages.${system}.include}/include/vestigia-ffi.c build/marks.c
+        cp ${vestigia.packages.${system}.include}/include/vestigia.c build/marks.c
         cd build
         ghc -O2 -rtsopts '-with-rtsopts=-xr1G -V0' Harness.hs marks.c \
           -I${vestigia.packages.${system}.include}/include \
