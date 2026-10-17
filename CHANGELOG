@@ -1,8 +1,15 @@
 # Changelog
 
 - 0.1.0 (unreleased)
-  * Initial version: `vestigia run` runs a harness under memcheck
-    with the bytes it marked secret made undefined, and reports each
-    branch and address computed from them (vestigia/trace-v1);
-    `vestigia read` reports from memcheck's XML; `vestigia.h` holds
-    the harness's two marks.
+  * Initial version, with two instruments over a harness that marks
+    its secret (`vestigia.h`, or `vestigia-ffi.c` through a foreign
+    function interface):
+    * `vestigia run`: the harness under memcheck with the secret's
+      bytes undefined, reporting each branch and address computed
+      from them (vestigia/trace-v1); `vestigia read` reports from
+      memcheck's XML.
+    * `vestigia record` and `vestigia diff`: the harness under QEMU
+      with vestigia's plugin, its leakage trace summarised per
+      instruction, and where runs differing only in the secret
+      diverge (vestigia/diff-v1).
+  * `traceOf` and `diffOf` run either as a derivation.
