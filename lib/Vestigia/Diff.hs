@@ -28,6 +28,12 @@
 -- branch and then used as an index differs between runs, though
 -- no undefined bit ever reached it. It sees only what the chosen
 -- secrets actually varied.
+--
+-- A difference means the secret only if nothing else differs
+-- between runs. Controls are runs repeating the first run's secret:
+-- an instruction that differs between the first run and a control
+-- differs without the secret (an entropy source, a clock) and is
+-- `unsteady`, counted and excluded from the origins.
 
 module Vestigia.Diff (
     Insn(..)
@@ -36,6 +42,7 @@ module Vestigia.Diff (
   , Origin(..)
   , Divergence(..)
   , diffDumps
+  , diffControlled
   , restrictTo
   , divergenceJson
   , divergenceSummary
@@ -102,19 +109,48 @@ data Origin =
 data Divergence = Divergence {
     dvOrigins :: ![(Origin, Insn)]
   , dvDownstream :: ![Insn]
+  , dvUnsteady :: ![Insn]
   , dvRuns :: !Int
+  , dvControls :: !Int
   } deriving (Eq, Show)
 
--- | Compare runs. Every run is set against every other, so an
---   origin is any instruction at which some two runs differ.
+-- | Compare runs, uncontrolled.
 diffDumps :: [Dump] -> Divergence
-diffDumps ds = Divergence {
-    dvOrigins = L.sortOn (inPc . snd) (controls <> addresses)
+diffDumps = diffControlled []
+
+-- | Compare runs, given controls repeating the first run's secret.
+--   Every run is set against every other, so an origin is any
+--   instruction at which some two runs differ, and which no control
+--   shows differing without the secret.
+diffControlled :: [Dump] -> [Dump] -> Divergence
+diffControlled cs ds = Divergence {
+    dvOrigins = L.sortOn (inPc . snd)
+      [ o | o@(_, i) <- controls <> addresses
+          , not (inPc i `S.member` unsteady) ]
   , dvDownstream = [ i | pc <- S.toAscList downstream
+                       , not (pc `S.member` unsteady)
                        , Just i <- [ firstInsn pc ] ]
+  , dvUnsteady = [ i | pc <- S.toAscList unsteady
+                     , Just i <- [ firstInsn pc ] ]
   , dvRuns = length ds
+  , dvControls = length cs
   }
   where
+    -- what differs between the first run and a repeat of its secret
+    unsteady = case ds of
+      (d : _) -> S.unions (fmap (differing d) cs)
+      [] -> S.empty
+    differing a b = S.fromList
+      [ pc
+      | pc <- S.toList (M.keysSet (dpInsns a)
+                          `S.union` M.keysSet (dpInsns b))
+      , let ia = M.lookup pc (dpInsns a)
+            ib = M.lookup pc (dpInsns b)
+            ta = M.lookup pc (dpTransfers a)
+            tb = M.lookup pc (dpTransfers b)
+      , fmap sig ia /= fmap sig ib || ta /= tb ]
+    sig i = (inCount i, inFingerprint i)
+
     pcs = S.unions (fmap (M.keysSet . dpInsns) ds)
     firstInsn pc = case [ i | d <- ds
                             , Just i <- [ M.lookup pc (dpInsns d) ] ] of
@@ -187,10 +223,12 @@ divergenceJson version places dv = Object
   , ("tool", Object [ ("name", String "vestigia")
                     , ("version", String version) ])
   , ("runs", Number (toInteger (dvRuns dv)))
+  , ("controls", Number (toInteger (dvControls dv)))
   , ("summary", Object
       [ ("control", count ControlOrigin)
       , ("address", count AddressOrigin)
       , ("downstream", Number (toInteger (length (dvDownstream dv))))
+      , ("unsteady", Number (toInteger (length (dvUnsteady dv))))
       ])
   , ("origins", Array
       [ Object $
@@ -202,15 +240,16 @@ divergenceJson version places dv = Object
           , ("frames", Array (fmap placeJson (placesOf i)))
           ]
       | (o, i) <- dvOrigins dv ])
-  , ("downstream", Object
-      [ (o, Number (toInteger n))
-      | (o, n) <- M.toList (M.fromListWith (+)
-          [ (maybe "-" id (inObject i), 1 :: Int)
-          | i <- dvDownstream dv ]) ])
+  , ("downstream", byObject (dvDownstream dv))
+  , ("unsteady", byObject (dvUnsteady dv))
   ]
   where
     count o = Number (toInteger (length
       [ () | (o', _) <- dvOrigins dv, o' == o ]))
+    byObject is = Object
+      [ (o, Number (toInteger n))
+      | (o, n) <- M.toList (M.fromListWith (+)
+          [ (maybe "-" id (inObject i), 1 :: Int) | i <- is ]) ]
     placesOf i = case inObject i of
       Just obj -> M.findWithDefault [] (obj, inOffset i) places
       Nothing -> []
@@ -234,7 +273,10 @@ divergenceSummary places dv = T.unlines $
   <> [ T.pack (show (length (dvOrigins dv))) <> " origin(s) over "
        <> T.pack (show (dvRuns dv)) <> " run(s); "
        <> T.pack (show (length (dvDownstream dv)))
-       <> " instruction(s) downstream" ]
+       <> " instruction(s) downstream; "
+       <> T.pack (show (length (dvUnsteady dv)))
+       <> " unsteady over " <> T.pack (show (dvControls dv))
+       <> " control(s)" ]
   where
     innermost i = case inObject i of
       Just obj -> case M.findWithDefault [] (obj, inOffset i) places of

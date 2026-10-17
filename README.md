@@ -85,12 +85,15 @@ in the secret, and `diff` reports where the runs diverge:
 $ for s in 1 2 3; do
 >   vestigia record --dump run-$s -- ./harness public_key 2 $s
 > done
-$ vestigia diff --object libpenumbra_audit --out diff.json run-*
+$ vestigia record --dump control -- ./harness public_key 2 1
+$ vestigia diff --object libpenumbra_audit --control control \
+>   --out diff.json run-*
 control  0xe9d6   Element::vartime_compress_to_field  sign.rs:11      ...
 address  0x152c8  Fq::sqrt_ratio_zeta                 invsqrt.rs:113  ...
 address  0x152eb  Fq::sqrt_ratio_zeta                 invsqrt.rs:117  ...
 ...
-44 origin(s) over 3 run(s); 1383 instruction(s) downstream
+44 origin(s) over 3 run(s); 1383 instruction(s) downstream; 0 unsteady
+over 1 control(s)
 ```
 
 An *origin* is a branch whose outcomes differ in proportion between
@@ -99,15 +102,26 @@ instruction run equally often whose addresses differ. Instructions
 that merely ran a different number of times sit where control had
 already diverged, and are counted as downstream rather than listed.
 `--object` keeps origins in objects whose path contains the given
-text. `record` turns address-space randomisation off for itself and
-QEMU, since runs to be compared must lay memory out alike.
+text.
+
+A difference means the secret only if nothing else differs between
+runs. `record` turns address-space randomisation off for itself and
+QEMU, and seeds the guest's entropy, so runs lay memory out alike
+and a hash table seeded from the system's randomness is laid out
+alike too. `--control DUMP` names a run repeating the first run's
+secret: whatever differs between the two (a clock read, a
+scheduler's choice) is *unsteady*, counted and kept out of the
+origins.
 
 ### As derivations
 
 The flake's `lib.<system>` holds `traceOf` and `diffOf`, which run a
 harness under either instrument as a derivation: a run for
 `x86_64-linux` then executes on whatever builds for that system, and
-its report is cached like any other output.
+its report is cached like any other output. `diffOf` repeats the
+first run as its control. `nix/lib.nix` holds the same definitions
+for one package set, for a consumer that pins vestigia and builds
+traces with its own nixpkgs.
 
 ```nix
 vestigia.lib.x86_64-linux.diffOf {

@@ -44,6 +44,9 @@ per three-run diff, on pollux.
   differential runs.
 - Address-space randomisation made identical runs differ at 2183
   places; `vestigia record` now turns it off for itself and QEMU.
-- A seed passed as an argument is decoded by libc, which shows as
-  origins in libc; differential origins are filtered to the
-  harness binary, which holds the whole Haskell program.
+- Even with layout fixed, a GHC program does not run identically
+  twice: about 120 instructions in libc and the runtime differ
+  between runs of the same key. A control run repeating the first
+  key exposes them, and `diff` sets them aside as unsteady; with
+  the control, mutants-1's origins are L3's address and L1's
+  branches, and none of the runtime's.

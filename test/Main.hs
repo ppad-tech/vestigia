@@ -134,6 +134,20 @@ diffTests = testGroup "diff"
       notElem 0x18 (fmap (inPc . snd) (dvOrigins dv))
         @? "a branch that always jumps is not secret-dependent"
 
+  , testCase "what differs without the secret is unsteady" $ do
+      a <- either assertFailure pure (readDump dumpA)
+      b <- either assertFailure pure (readDump dumpB)
+      -- a repeat of A whose 0x20 touched other addresses: an
+      -- entropy source, not the secret
+      c <- either assertFailure pure (readDump (T.unlines
+        [ "I 10 4 0 aaaa /lib.so 10", "E 10 30 2"
+        , "I 20 4 4 ffff /lib.so 20", "I 30 2 0 cccc /lib.so 30"
+        , "I 40 1 1 dddd /lib.so 40" ]))
+      let dv = diffControlled [ c ] [ a, b ]
+      fmap (\(o, i) -> (o, inPc i)) (dvOrigins dv)
+        @?= [ (ControlOrigin, 0x10) ]
+      fmap inPc (dvUnsteady dv) @?= [ 0x20 ]
+
   , testCase "identical runs have no origins" $ do
       a <- either assertFailure pure (readDump dumpA)
       let dv = diffDumps [ a, a ]

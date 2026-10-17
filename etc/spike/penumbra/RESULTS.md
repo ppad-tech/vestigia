@@ -34,7 +34,10 @@ address):
   check.
 
 Differential traces (44, 45, and 72 origins; about 1380
-instructions downstream):
+instructions downstream; with the guest's entropy seeded and a
+control repeating the first secret, none unsteady, so the
+`invsqrt` lookups are the secret's and not hashbrown's random
+seeding):
 
 - The double-and-add (bits.rs:25, 32; skip_while.rs:50).
 - The modulus compares inside every field operation on the point's

@@ -11,5 +11,8 @@
     * `vestigia record` and `vestigia diff`: the harness under QEMU
       with vestigia's plugin, its leakage trace summarised per
       instruction, and where runs differing only in the secret
-      diverge (vestigia/diff-v1).
-  * `traceOf` and `diffOf` run either as a derivation.
+      diverge (vestigia/diff-v1), set against controls repeating a
+      secret; runs are recorded with randomisation off and the
+      guest's entropy seeded.
+  * `traceOf` and `diffOf` run either as a derivation;
+    `nix/lib.nix` holds them for any package set.

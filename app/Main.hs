@@ -1,4 +1,3 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- |
@@ -15,8 +14,7 @@ module Main (
   ) where
 
 import Control.Exception (IOException, try)
-import Control.Monad (when)
-import Foreign.C.Types (CInt(..))
+import Control.Monad (unless)
 import qualified Data.ByteString as BS
 import Data.Version (showVersion)
 import qualified Data.Text as T
@@ -31,17 +29,13 @@ import System.Process (proc, waitForProcess, withCreateProcess)
 
 import Paths_vestigia (version)
 import Vestigia.Diff
-  (diffDumps, divergenceJson, divergenceSummary, dvOrigins, inObject,
-   inOffset, readDump, restrictTo)
+  (diffControlled, divergenceJson, divergenceSummary, dvOrigins,
+   inObject, inOffset, readDump, restrictTo)
 import Vestigia.Json (encode)
+import Vestigia.Layout (fixLayout)
 import Vestigia.Memcheck (readMemcheck)
 import Vestigia.Symbol (symbolize)
 import Vestigia.Trace (trace, traceJson, traceSummary)
-
--- address-space randomisation off, for this process and its
--- children; nonzero where it cannot be (cbits/norandom.c)
-foreign import ccall unsafe "vestigia_no_randomize"
-  c_noRandomize :: IO CInt
 
 data Opts = Opts {
     oValgrind :: !(Maybe FilePath)
@@ -52,6 +46,7 @@ data Opts = Opts {
   , oDump :: !(Maybe FilePath)
   , oAddr2line :: !(Maybe FilePath)
   , oObjects :: ![T.Text]
+  , oControls :: ![FilePath]
   }
 
 main :: IO ()
@@ -88,7 +83,7 @@ usage e = do
     , "  vestigia record [--qemu PATH] [--plugin PATH] --dump FILE \
       \-- PROGRAM [ARG...]"
     , "  vestigia diff [--out FILE] [--addr2line PATH] \
-      \[--object TEXT]... DUMP DUMP..."
+      \[--object TEXT]... [--control DUMP]... DUMP DUMP..."
     , ""
     , "run executes PROGRAM under memcheck, which reports every"
     , "branch and address that depended on bytes the program marked"
@@ -99,7 +94,9 @@ usage e = do
     , "dumps its leakage trace per instruction; diff compares dumps"
     , "of runs that differ only in a secret and reports where they"
     , "diverge (vestigia/diff-v1), naming sources with addr2line."
-    , "--object keeps origins in objects whose path contains TEXT."
+    , "--object keeps origins in objects whose path contains TEXT;"
+    , "--control names a run repeating the first run's secret, and"
+    , "what differs in it is unsteady, not an origin."
     , "qemu, the plugin, and addr2line default to $VESTIGIA_QEMU,"
     , "$VESTIGIA_PLUGIN, and $VESTIGIA_ADDR2LINE."
     ]
@@ -108,7 +105,7 @@ usage e = do
 -- options before the program; "--" ends them
 options :: [String] -> Either String (Opts, [String])
 options = go (Opts Nothing Nothing Nothing Nothing Nothing Nothing
-              Nothing [])
+              Nothing [] [])
   where
     go o xs = case xs of
       ("--" : rest) -> Right (o, rest)
@@ -121,6 +118,8 @@ options = go (Opts Nothing Nothing Nothing Nothing Nothing Nothing
       ("--addr2line" : p : rest) -> go o { oAddr2line = Just p } rest
       ("--object" : t : rest) ->
         go o { oObjects = oObjects o <> [ T.pack t ] } rest
+      ("--control" : p : rest) ->
+        go o { oControls = oControls o <> [ p ] } rest
       (x : _) | take 2 x == "--" -> Left ("unknown option: " <> x)
       _ -> Right (o, xs)
 
@@ -196,15 +195,18 @@ tool opt var dflt = do
 record :: Opts -> FilePath -> [String] -> IO ()
 record o prog progArgs = do
   dump <- maybe (usage "record: --dump FILE is needed") pure (oDump o)
-  -- runs to be compared must lay memory out alike
-  fixed <- c_noRandomize
-  when (fixed /= 0) $ hPutStrLn stderr
+  -- runs to be compared must lay memory out alike, and draw the
+  -- same entropy: a hash table seeded from the operating system's
+  -- randomness is laid out anew in every process
+  fixed <- fixLayout
+  unless fixed $ hPutStrLn stderr
     "vestigia: address randomisation is still on; runs may differ \
     \in layout, and so everywhere"
   qemu <- tool (oQemu o) "VESTIGIA_QEMU" "qemu-x86_64"
   plugin <- tool (oPlugin o) "VESTIGIA_PLUGIN" "libvestigia-qemu.so"
   r <- try (withCreateProcess
-         (proc qemu ([ "-plugin", plugin <> ",out=" <> dump, prog ]
+         (proc qemu ([ "-seed", "0"
+                     , "-plugin", plugin <> ",out=" <> dump, prog ]
                      <> progArgs))
          (\_ _ _ ph -> waitForProcess ph))
   case r of
@@ -218,7 +220,8 @@ diff :: Opts -> [FilePath] -> IO ()
 diff o paths = do
   addr2line <- tool (oAddr2line o) "VESTIGIA_ADDR2LINE" "addr2line"
   dumps <- traverse readOne paths
-  let dv = restrictTo (oObjects o) (diffDumps dumps)
+  controls <- traverse readOne (oControls o)
+  let dv = restrictTo (oObjects o) (diffControlled controls dumps)
   places <- symbolize addr2line
     [ (obj, inOffset i) | (_, i) <- dvOrigins dv
                         , Just obj <- [ inObject i ] ]

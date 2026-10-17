@@ -26,9 +26,12 @@ library
   hs-source-dirs:   lib
   ghc-options:
       -Wall -Werror
+  c-sources:
+      cbits/norandom.c
   exposed-modules:
       Vestigia.Diff
     , Vestigia.Json
+    , Vestigia.Layout
     , Vestigia.Memcheck
     , Vestigia.Symbol
     , Vestigia.Trace
@@ -45,8 +48,6 @@ executable vestigia
   main-is:          Main.hs
   ghc-options:
       -Wall -Werror -rtsopts
-  c-sources:
-      cbits/norandom.c
   other-modules:
       Paths_vestigia
   autogen-modules:
