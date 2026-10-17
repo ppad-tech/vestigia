@@ -3,8 +3,11 @@
  * fresh random secrets, marked secret before the call, with the
  * outputs Penumbra reveals marked public after it.
  *
- * usage: harness ROOT [RUNS]
+ * usage: harness ROOT [RUNS [SEED]]
  *   ROOT is public_key, key_agreement, or spend_auth_sign
+ *   SEED (16 hex digits) seeds the secrets alone; public inputs come
+ *   from a fixed stream, so runs that differ in SEED differ only in
+ *   their secrets.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -17,29 +20,30 @@ void penumbra_audit_public_key(uint8_t *ws);
 void penumbra_audit_key_agreement(uint8_t *ws);
 void penumbra_audit_spend_auth_sign(uint8_t *ws);
 
-static uint64_t state = 0x9e3779b97f4a7c15ULL;
+static uint64_t secrets = 0x9e3779b97f4a7c15ULL;
+static uint64_t publics = 0x0123456789abcdefULL;
 
-static uint64_t splitmix(void) {
-  uint64_t z = (state += 0x9e3779b97f4a7c15ULL);
+static uint64_t splitmix(uint64_t *state) {
+  uint64_t z = (*state += 0x9e3779b97f4a7c15ULL);
   z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
   z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
   return z ^ (z >> 31);
 }
 
-static void fill(uint8_t *p, size_t n) {
-  for (size_t i = 0; i < n; i++) p[i] = (uint8_t)splitmix();
+static void fill(uint64_t *state, uint8_t *p, size_t n) {
+  for (size_t i = 0; i < n; i++) p[i] = (uint8_t)splitmix(state);
 }
 
 /* a canonical scalar: random little-endian bytes with the top byte
  * cleared, below the decaf377 scalar modulus */
-static void scalar(uint8_t *p) {
-  fill(p, 32);
+static void scalar(uint64_t *state, uint8_t *p) {
+  fill(state, p, 32);
   p[31] = 0;
 }
 
 static void public_key(void) {
   uint8_t ws[64];
-  scalar(ws);
+  scalar(&secrets, ws);
   vestigia_secret(ws, 32);
   penumbra_audit_public_key(ws);
   vestigia_public(ws + 32, 32);
@@ -48,9 +52,9 @@ static void public_key(void) {
 static void key_agreement(void) {
   uint8_t peer[64];
   uint8_t ws[96];
-  scalar(peer);
+  scalar(&publics, peer);
   penumbra_audit_public_key(peer);
-  scalar(ws);
+  scalar(&secrets, ws);
   memcpy(ws + 32, peer + 32, 32);
   vestigia_secret(ws, 32);
   penumbra_audit_key_agreement(ws);
@@ -58,9 +62,9 @@ static void key_agreement(void) {
 
 static void spend_auth_sign(void) {
   uint8_t ws[208];
-  scalar(ws);
-  fill(ws + 32, 80);
-  fill(ws + 112, 32);
+  scalar(&secrets, ws);
+  fill(&secrets, ws + 32, 80);
+  fill(&publics, ws + 112, 32);
   /* the key and the signing randomness are secret; the message is
    * public */
   vestigia_secret(ws, 112);
@@ -74,6 +78,7 @@ int main(int argc, char **argv) {
     return 2;
   }
   int runs = argc > 2 ? atoi(argv[2]) : 4;
+  if (argc > 3) secrets = strtoull(argv[3], NULL, 16);
   void (*root)(void) = NULL;
   if (strcmp(argv[1], "public_key") == 0) root = public_key;
   else if (strcmp(argv[1], "key_agreement") == 0) root = key_agreement;

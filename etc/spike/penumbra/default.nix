@@ -39,9 +39,22 @@ let
   };
 
   roots = [ "public_key" "key_agreement" "spend_auth_sign" ];
+
+  # three processes of two calls each, differing only in the secrets
+  seeds = [ "0000000000000001" "0000000000000002" "0000000000000003" ];
+  diffOf = build: lib: root: vestigia.lib.${system}.diffOf {
+    name = "penumbra-${build}-${root}";
+    harness = "${harnessFor lib}/bin/harness";
+    runs = map (s: [ root "2" s ]) seeds;
+    objects = [ "libpenumbra_audit" ];
+  };
 in
 {
   inherit audited lines;
+
+  diffs = pkgs.linkFarm "penumbra-diffs" (
+    map (r: { name = "lines/${r}"; path = diffOf "lines" lines r; })
+      roots);
 
   traces = pkgs.linkFarm "penumbra-traces" (
     map (r: { name = "audited/${r}"; path = traceOf "audited" audited r; })

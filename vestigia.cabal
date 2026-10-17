@@ -27,13 +27,16 @@ library
   ghc-options:
       -Wall -Werror
   exposed-modules:
-      Vestigia.Json
+      Vestigia.Diff
+    , Vestigia.Json
     , Vestigia.Memcheck
+    , Vestigia.Symbol
     , Vestigia.Trace
     , Vestigia.Xml
   build-depends:
       base >= 4.9 && < 5
     , containers
+    , process
     , text
 
 executable vestigia
@@ -64,6 +67,7 @@ test-suite vestigia-tests
   build-depends:
       base
     , bytestring
+    , containers
     , tasty
     , tasty-hunit
     , text
