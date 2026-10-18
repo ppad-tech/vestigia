@@ -34,6 +34,10 @@
 -- an instruction that differs between the first run and a control
 -- differs without the secret (an entropy source, a clock) and is
 -- `unsteady`, counted and excluded from the origins.
+--
+-- What every run executed, per object, is reported beside: the
+-- instructions the chosen secrets exercised, and so, against what
+-- a function could execute, the part of it the comparison saw.
 
 module Vestigia.Diff (
     Insn(..)
@@ -112,6 +116,8 @@ data Divergence = Divergence {
   , dvUnsteady :: ![Insn]
   , dvRuns :: !Int
   , dvControls :: !Int
+    -- | the offsets some run, control or not, executed, by object
+  , dvExecuted :: !(M.Map T.Text (S.Set Integer))
   } deriving (Eq, Show)
 
 -- | Compare runs, uncontrolled.
@@ -134,6 +140,12 @@ diffControlled cs ds = Divergence {
                      , Just i <- [ firstInsn pc ] ]
   , dvRuns = length ds
   , dvControls = length cs
+  , dvExecuted = M.fromListWith S.union
+      [ (obj, S.singleton (inOffset i))
+      | d <- ds <> cs
+      , i <- M.elems (dpInsns d)
+      , inCount i > 0
+      , Just obj <- [ inObject i ] ]
   }
   where
     -- what differs between the first run and a repeat of its secret
@@ -199,14 +211,19 @@ diffControlled cs ds = Divergence {
       , Just i <- [ firstInsn pc ]
       , inAccesses i > 0 ]
 
--- | Only the origins in objects whose path contains one of the
---   given texts; downstream instructions are kept, to be counted.
+-- | Only the origins, and what was executed, in objects whose path
+--   contains one of the given texts; downstream instructions are
+--   kept, to be counted.
 restrictTo :: [T.Text] -> Divergence -> Divergence
 restrictTo ps dv
   | null ps = dv
-  | otherwise = dv { dvOrigins = filter (inside . snd) (dvOrigins dv) }
+  | otherwise = dv {
+        dvOrigins = filter (inside . inObject . snd) (dvOrigins dv)
+      , dvExecuted = M.filterWithKey (\o _ -> inside (Just o))
+          (dvExecuted dv)
+      }
   where
-    inside i = case inObject i of
+    inside mo = case mo of
       Just o -> any (`T.isInfixOf` o) ps
       Nothing -> False
 
@@ -242,6 +259,9 @@ divergenceJson version places dv = Object
       | (o, i) <- dvOrigins dv ])
   , ("downstream", byObject (dvDownstream dv))
   , ("unsteady", byObject (dvUnsteady dv))
+  , ("executed", Object
+      [ (o, Array (fmap (String . hex) (S.toAscList xs)))
+      | (o, xs) <- M.toList (dvExecuted dv) ])
   ]
   where
     count o = Number (toInteger (length

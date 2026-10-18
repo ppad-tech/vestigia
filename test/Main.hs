@@ -6,6 +6,7 @@ module Main (
 
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as M
+import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Test.Tasty
@@ -166,6 +167,18 @@ diffTests = testGroup "diff"
       let dv = diffDumps [ a, a ]
       dvOrigins dv @?= []
       dvDownstream dv @?= []
+
+  , testCase "what any run executed is kept per object" $ do
+      a <- either assertFailure pure (readDump dumpA)
+      b <- either assertFailure pure (readDump (T.unlines
+        [ "I 10 4 0 aaaa /lib.so 10", "I 50 1 0 eeee /lib.so 50"
+        , "I 60 1 0 ffff /libc.so 60", "I 70 0 0 0000 /lib.so 70" ]))
+      let dv = diffDumps [ a, b ]
+      dvExecuted dv @?= M.fromList
+        [ ("/lib.so", S.fromList [ 0x10, 0x20, 0x30, 0x40, 0x50 ])
+        , ("/libc.so", S.fromList [ 0x60 ]) ]
+      M.keys (dvExecuted (restrictTo [ "lib.so" ] dv))
+        @?= [ "/lib.so" ]
 
   , testCase "an unreadable line is refused" $
       isLeft (readDump "I 10 zz 0 f /lib.so 0\n") @? "accepted"
