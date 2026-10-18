@@ -108,6 +108,13 @@ some run executed: what the chosen secrets exercised, to set against
 what the code could execute. `--object` keeps origins, and what was
 executed, to objects whose path contains the given text.
 
+`--designed DUMP` names a run aimed at a particular path. It differs
+from the others in where it goes, not only in the secret, so it
+counts toward the control origins (a branch whose outcomes shift
+under it chose by the secret) and what was executed, never toward
+the address origins, which only runs alike in all but the secret can
+show.
+
 A difference means the secret only if nothing else differs between
 runs. `record` turns address-space randomisation off for itself and
 QEMU, and seeds the guest's entropy, so runs lay memory out alike

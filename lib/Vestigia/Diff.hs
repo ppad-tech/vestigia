@@ -35,6 +35,14 @@
 -- differs without the secret (an entropy source, a clock) and is
 -- `unsteady`, counted and excluded from the origins.
 --
+-- Runs designed to reach a particular path are compared beside these
+-- but not alike: they differ from the others in where they go, not
+-- only in the secret, so an instruction's addresses differing in one
+-- of them says nothing about the secret. A designed run counts toward
+-- the control origins (a branch whose outcomes shift under it chose
+-- by the secret) and what was executed, never toward the address
+-- origins, which only runs alike in all but the secret can show.
+--
 -- What every run executed, per object, is reported beside: the
 -- instructions the chosen secrets exercised, and so, against what
 -- a function could execute, the part of it the comparison saw.
@@ -47,6 +55,7 @@ module Vestigia.Diff (
   , Divergence(..)
   , diffDumps
   , diffControlled
+  , diffDesigned
   , restrictTo
   , divergenceJson
   , divergenceSummary
@@ -116,6 +125,7 @@ data Divergence = Divergence {
   , dvUnsteady :: ![Insn]
   , dvRuns :: !Int
   , dvControls :: !Int
+  , dvDesigned :: !Int
     -- | the offsets some run, control or not, executed, by object
   , dvExecuted :: !(M.Map T.Text (S.Set Integer))
   } deriving (Eq, Show)
@@ -129,7 +139,13 @@ diffDumps = diffControlled []
 --   instruction at which some two runs differ, and which no control
 --   shows differing without the secret.
 diffControlled :: [Dump] -> [Dump] -> Divergence
-diffControlled cs ds = Divergence {
+diffControlled cs ds = diffDesigned cs ds []
+
+-- | Compare runs, given controls and runs designed to reach particular
+--   paths. The address origins are the declared runs' alone; the
+--   control origins and what was executed are every run's.
+diffDesigned :: [Dump] -> [Dump] -> [Dump] -> Divergence
+diffDesigned cs ds xs = Divergence {
     dvOrigins = L.sortOn (inPc . snd)
       [ o | o@(_, i) <- controls <> addresses
           , not (inPc i `S.member` unsteady) ]
@@ -140,9 +156,10 @@ diffControlled cs ds = Divergence {
                      , Just i <- [ firstInsn pc ] ]
   , dvRuns = length ds
   , dvControls = length cs
+  , dvDesigned = length xs
   , dvExecuted = M.fromListWith S.union
       [ (obj, S.singleton (inOffset i))
-      | d <- ds <> cs
+      | d <- ds <> xs <> cs
       , i <- M.elems (dpInsns d)
       , inCount i > 0
       , Just obj <- [ inObject i ] ]
@@ -163,26 +180,34 @@ diffControlled cs ds = Divergence {
       , fmap sig ia /= fmap sig ib || ta /= tb ]
     sig i = (inCount i, inFingerprint i)
 
-    pcs = S.unions (fmap (M.keysSet . dpInsns) ds)
-    firstInsn pc = case [ i | d <- ds
+    -- every run, the declared first
+    runs = ds <> xs
+
+    pcs = S.unions (fmap (M.keysSet . dpInsns) runs)
+    firstInsn pc = case [ i | d <- runs
                             , Just i <- [ M.lookup pc (dpInsns d) ] ] of
       (i : _) -> Just i
       [] -> Nothing
 
     -- run counts per run, absent counted as never run
-    countsAt pc = [ maybe 0 inCount (M.lookup pc (dpInsns d)) | d <- ds ]
-    alike xs = case xs of
+    countsIn rs pc =
+      [ maybe 0 inCount (M.lookup pc (dpInsns d)) | d <- rs ]
+    alike ys = case ys of
       [] -> True
-      (x : rest) -> all (== x) rest
+      (y : rest) -> all (== y) rest
 
-    steady = S.filter (alike . countsAt) pcs
+    -- run equally often in every run, and in every declared run
+    steady = S.filter (alike . countsIn runs) pcs
+    steadyDeclared = S.filter (alike . countsIn ds)
+      (S.unions (fmap (M.keysSet . dpInsns) ds))
 
     -- an instruction's run count and transfers, in each run that ran
     -- it
     ranAt pc =
       [ (inCount i, M.findWithDefault M.empty pc (dpTransfers d))
-      | d <- ds, Just i <- [ M.lookup pc (dpInsns d) ], inCount i > 0 ]
-    transferSources = S.unions (fmap (M.keysSet . dpTransfers) ds)
+      | d <- runs, Just i <- [ M.lookup pc (dpInsns d) ]
+      , inCount i > 0 ]
+    transferSources = S.unions (fmap (M.keysSet . dpTransfers) runs)
 
     -- outcomes in the same proportion: each target taken as often,
     -- relative to the run count, in both
@@ -195,7 +220,9 @@ diffControlled cs ds = Divergence {
       [] -> False
 
     controlPcs = S.filter divergent transferSources
-    downstream = (pcs `S.difference` steady) `S.difference` controlPcs
+    addressPcs = S.fromList [ inPc i | (_, i) <- addresses ]
+    downstream = ((pcs `S.difference` steady) `S.difference` controlPcs)
+      `S.difference` addressPcs
 
     controls =
       [ (ControlOrigin, i)
@@ -204,7 +231,7 @@ diffControlled cs ds = Divergence {
 
     addresses =
       [ (AddressOrigin, i)
-      | pc <- S.toAscList steady
+      | pc <- S.toAscList steadyDeclared
       , let fps = [ fmap inFingerprint (M.lookup pc (dpInsns d))
                   | d <- ds ]
       , not (alike fps)
@@ -241,6 +268,7 @@ divergenceJson version places dv = Object
                     , ("version", String version) ])
   , ("runs", Number (toInteger (dvRuns dv)))
   , ("controls", Number (toInteger (dvControls dv)))
+  , ("designed", Number (toInteger (dvDesigned dv)))
   , ("summary", Object
       [ ("control", count ControlOrigin)
       , ("address", count AddressOrigin)
@@ -291,7 +319,10 @@ divergenceSummary places dv = T.unlines $
       , maybe "-" base (inObject i) ]
   | (o, i) <- dvOrigins dv ]
   <> [ T.pack (show (length (dvOrigins dv))) <> " origin(s) over "
-       <> T.pack (show (dvRuns dv)) <> " run(s); "
+       <> T.pack (show (dvRuns dv)) <> " run(s)"
+       <> (if dvDesigned dv == 0 then ""
+           else " and " <> T.pack (show (dvDesigned dv)) <> " designed")
+       <> "; "
        <> T.pack (show (length (dvDownstream dv)))
        <> " instruction(s) downstream; "
        <> T.pack (show (length (dvUnsteady dv)))

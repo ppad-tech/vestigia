@@ -93,9 +93,11 @@ let
   # keeps origins in objects whose path contains one of them. The
   # first run is repeated as a control, so that what differs
   # without the secret is set aside rather than taken for it.
-  # A run's own failure leaves its status; a dump vestigia
-  # cannot read fails the build.
-  diffOf = { name, harness, runs, objects ? [ ] }:
+  # `designed` runs, aimed at particular paths, are compared beside
+  # them for control and coverage but not for addresses (vestigia
+  # diff --designed). A run's own failure leaves its status; a dump
+  # vestigia cannot read fails the build.
+  diffOf = { name, harness, runs, objects ? [ ], designed ? [ ] }:
     pkgs.runCommand "vestigia-diff-${name}" { } ''
       mkdir -p $out
       start=$(date +%s%N)
@@ -106,7 +108,16 @@ let
           > $out/stdout-${toString k} 2> $out/stderr-${toString k}
         echo $? > $out/status-${toString k}
         set -e
-      '') runs}
+      '') runs}${lib.concatImapStrings (k: args: ''
+        set +e
+        ${vestigia}/bin/vestigia record \
+          --dump $out/designed-${toString k} \
+          -- ${harness} ${lib.escapeShellArgs args} \
+          > $out/stdout-designed-${toString k} \
+          2> $out/stderr-designed-${toString k}
+        echo $? > $out/status-designed-${toString k}
+        set -e
+      '') designed}
       set +e
       ${vestigia}/bin/vestigia record --dump $out/control-1 \
         -- ${harness} ${lib.escapeShellArgs (builtins.head runs)} \
@@ -115,7 +126,8 @@ let
       set -e
       ${vestigia}/bin/vestigia diff --out $out/diff.json \
         ${lib.concatMapStrings (o: "--object ${lib.escapeShellArg o} ")
-          objects} \
+          objects}${lib.concatImapStrings (k: _:
+          "--designed $out/designed-${toString k} ") designed} \
         --control $out/control-1 \
         $out/dump-* 2> $out/summary
       echo $(( ($(date +%s%N) - start) / 1000000 )) > $out/milliseconds
