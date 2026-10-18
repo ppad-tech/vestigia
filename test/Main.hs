@@ -162,6 +162,25 @@ diffTests = testGroup "diff"
         @?= [ (ControlOrigin, 0x10) ]
       fmap inPc (dvUnsteady dv) @?= [ 0x20 ]
 
+  , testCase "a designed run moves control, not addresses" $ do
+      a <- either assertFailure pure (readDump dumpA)
+      b <- either assertFailure pure (readDump dumpB)
+      -- a run designed onto another path: 0x10 taken every time, and
+      -- 0x20's addresses its own
+      x <- either assertFailure pure (readDump (T.unlines
+        [ "I 10 4 0 aaaa /lib.so 10", "E 10 30 4"
+        , "I 20 4 4 9999 /lib.so 20", "I 30 4 0 cccc /lib.so 30"
+        , "I 50 1 0 eeee /lib.so 50" ]))
+      let dv = diffDesigned [] [ a, a ] [ x ]
+      fmap (\(o, i) -> (o, inPc i)) (dvOrigins dv)
+        @?= [ (ControlOrigin, 0x10) ]
+      dvDesigned dv @?= 1
+      M.lookup "/lib.so" (dvExecuted dv)
+        @?= Just (S.fromList [ 0x10, 0x20, 0x30, 0x40, 0x50 ])
+      -- a declared run differing there is still an address origin
+      fmap (\(o, i) -> (o, inPc i)) (dvOrigins (diffDesigned [] [ a, b ]
+        [ x ])) @?= [ (ControlOrigin, 0x10), (AddressOrigin, 0x20) ]
+
   , testCase "identical runs have no origins" $ do
       a <- either assertFailure pure (readDump dumpA)
       let dv = diffDumps [ a, a ]

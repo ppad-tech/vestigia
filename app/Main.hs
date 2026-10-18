@@ -30,7 +30,7 @@ import qualified System.Process as P
 
 import Paths_vestigia (version)
 import Vestigia.Diff
-  (diffControlled, divergenceJson, divergenceSummary, dvOrigins,
+  (diffDesigned, divergenceJson, divergenceSummary, dvOrigins,
    inObject, inOffset, readDump, restrictTo)
 import Vestigia.Json (encode)
 import Vestigia.Layout (fixLayout)
@@ -49,6 +49,7 @@ data Opts = Opts {
   , oAddr2line :: !(Maybe FilePath)
   , oObjects :: ![T.Text]
   , oControls :: ![FilePath]
+  , oDesigned :: ![FilePath]
   }
 
 main :: IO ()
@@ -85,7 +86,8 @@ usage e = do
     , "  vestigia record [--qemu PATH] [--plugin PATH] --dump FILE \
       \-- PROGRAM [ARG...]"
     , "  vestigia diff [--out FILE] [--addr2line PATH] \
-      \[--object TEXT]... [--control DUMP]... DUMP DUMP..."
+      \[--object TEXT]... [--control DUMP]... [--designed DUMP]... \
+      \DUMP DUMP..."
     , ""
     , "run executes PROGRAM under memcheck, which reports every"
     , "branch and address that depended on bytes the program marked"
@@ -107,7 +109,7 @@ usage e = do
 -- options before the program; "--" ends them
 options :: [String] -> Either String (Opts, [String])
 options = go (Opts Nothing Nothing Nothing Nothing Nothing Nothing
-              Nothing [] [])
+              Nothing [] [] [])
   where
     go o xs = case xs of
       ("--" : rest) -> Right (o, rest)
@@ -122,6 +124,8 @@ options = go (Opts Nothing Nothing Nothing Nothing Nothing Nothing
         go o { oObjects = oObjects o <> [ T.pack t ] } rest
       ("--control" : p : rest) ->
         go o { oControls = oControls o <> [ p ] } rest
+      ("--designed" : p : rest) ->
+        go o { oDesigned = oDesigned o <> [ p ] } rest
       (x : _) | take 2 x == "--" -> Left ("unknown option: " <> x)
       _ -> Right (o, xs)
 
@@ -239,7 +243,9 @@ diff o paths = do
   addr2line <- tool (oAddr2line o) "VESTIGIA_ADDR2LINE" "addr2line"
   dumps <- traverse readOne paths
   controls <- traverse readOne (oControls o)
-  let dv = restrictTo (oObjects o) (diffControlled controls dumps)
+  designed <- traverse readOne (oDesigned o)
+  let dv = restrictTo (oObjects o)
+        (diffDesigned controls dumps designed)
   places <- symbolize addr2line
     [ (obj, inOffset i) | (_, i) <- dvOrigins dv
                         , Just obj <- [ inObject i ] ]
