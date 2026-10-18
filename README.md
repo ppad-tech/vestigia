@@ -103,8 +103,10 @@ runs (a loop whose trip count the secret sets is one) or an
 instruction run equally often whose addresses differ. Instructions
 that merely ran a different number of times sit where control had
 already diverged, and are counted as downstream rather than listed.
-`--object` keeps origins in objects whose path contains the given
-text.
+The report also lists, per object, the offset of every instruction
+some run executed: what the chosen secrets exercised, to set against
+what the code could execute. `--object` keeps origins, and what was
+executed, to objects whose path contains the given text.
 
 A difference means the secret only if nothing else differs between
 runs. `record` turns address-space randomisation off for itself and
