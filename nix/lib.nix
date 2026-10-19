@@ -129,7 +129,8 @@ let
           objects}${lib.concatImapStrings (k: _:
           "--designed $out/designed-${toString k} ") designed} \
         --control $out/control-1 \
-        $out/dump-* 2> $out/summary
+        ${lib.concatImapStrings (k: _: "$out/dump-${toString k} ")
+          runs}2> $out/summary
       echo $(( ($(date +%s%N) - start) / 1000000 )) > $out/milliseconds
     '';
 in

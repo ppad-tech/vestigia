@@ -181,6 +181,36 @@ diffTests = testGroup "diff"
       fmap (\(o, i) -> (o, inPc i)) (dvOrigins (diffDesigned [] [ a, b ]
         [ x ])) @?= [ (ControlOrigin, 0x10), (AddressOrigin, 0x20) ]
 
+  , testCase "an origin names the runs alike at it" $ do
+      a <- either assertFailure pure (readDump dumpA)
+      b <- either assertFailure pure (readDump dumpB)
+      x <- either assertFailure pure (readDump (T.unlines
+        [ "I 10 4 0 aaaa /lib.so 10", "E 10 30 4"
+        , "I 20 4 4 9999 /lib.so 20", "I 30 4 0 cccc /lib.so 30" ]))
+      -- at the branch, the first and third runs alike; the designed
+      -- run is a control origin's to group, and the address origin
+      -- speaks only of the declared runs
+      let dv = diffDesigned [] [ a, b, a ] [ x ]
+      M.lookup (ControlOrigin, 0x10) (dvBehaviour dv)
+        @?= Just ([ [ 0, 2 ], [ 1 ], [ 3 ] ], [])
+      M.lookup (AddressOrigin, 0x20) (dvBehaviour dv)
+        @?= Just ([ [ 0, 2 ], [ 1 ] ], [])
+      -- the designed run never reaches 0x40
+      M.lookup (ControlOrigin, 0x10)
+        (dvBehaviour (diffDesigned [] [ a, a ] [ x ]))
+        @?= Just ([ [ 0, 1 ], [ 2 ] ], [])
+
+  , testCase "downstream is kept to the objects under audit" $ do
+      a <- either assertFailure pure (readDump dumpA)
+      b <- either assertFailure pure (readDump (T.unlines
+        [ "I 10 4 0 aaaa /lib.so 10", "E 10 30 3"
+        , "I 20 4 4 bbbb /lib.so 20", "I 30 3 0 cccc /lib.so 30"
+        , "I 40 1 1 dddd /lib.so 40", "I 60 2 0 ffff /libc.so 60" ]))
+      let dv = diffDumps [ a, b ]
+      fmap inPc (dvDownstream dv) @?= [ 0x30, 0x60 ]
+      fmap inPc (dvDownstream (restrictTo [ "lib.so" ] dv))
+        @?= [ 0x30 ]
+
   , testCase "identical runs have no origins" $ do
       a <- either assertFailure pure (readDump dumpA)
       let dv = diffDumps [ a, a ]
