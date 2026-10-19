@@ -45,9 +45,11 @@ The harness compiles `include/vestigia.c` beside it, which defines
 the marks; a harness that reaches them through a foreign function
 interface (a Haskell `foreign import ccall`) compiles the same file.
 Outside valgrind the marks are no-ops, so the same harness can be
-timed by censor unchanged. On Linux the first secret mark also
-writes where the loader put each object, for `vestigia run` to name
-every site by its object and its address in it.
+timed by censor unchanged. On Linux the first secret mark of any
+bytes also writes where the loader put each object, for `vestigia
+run` to name every site by its object and its address in it. A run
+that marked nothing found nothing because nothing was secret, and
+`run` refuses it.
 
 ### Taint: `vestigia run`
 
@@ -99,7 +101,8 @@ address  0x152eb  Fq::sqrt_ratio_zeta                 invsqrt.rs:117  ...
 ```
 
 An *origin* is a branch whose outcomes differ in proportion between
-runs (a loop whose trip count the secret sets is one) or an
+runs (a loop whose trip count the secret sets is one), a branch
+taking the same outcomes as often in another order, or an
 instruction run equally often whose addresses differ. Each origin
 names the runs that behaved alike there, grouped, and the runs that
 never reached it, each run by its dump's file name: which secrets
@@ -111,18 +114,25 @@ chosen secrets exercised, to set against what the code could
 execute. `--object` keeps origins, what ran downstream, and what
 was executed, to objects whose path contains the given text.
 
-`--designed DUMP` names a run aimed at a particular path. It differs
-from the others in where it goes, not only in the secret, so it
-counts toward the control origins (a branch whose outcomes shift
-under it chose by the secret) and what was executed, never toward
-the address origins, which only runs alike in all but the secret can
-show.
+`--designed DUMP` names a run aimed at a particular path: the same
+harness with the same arguments, differing from the others only in a
+secret chosen to reach that path. A run whose public inputs differ
+is not designed but another experiment, and its differences say
+nothing about the secret. A designed run counts toward the control
+origins (a branch whose outcomes shift under it chose by the
+secret) and what was executed, never toward the address origins:
+it goes where the others do not, so an instruction's addresses
+differing in it need not mean an address computed from the secret.
 
 A difference means the secret only if nothing else differs between
 runs. `record` turns address-space randomisation off for itself and
-QEMU, and seeds the guest's entropy, so runs lay memory out alike
-and a hash table seeded from the system's randomness is laid out
-alike too. `--control DUMP` names a run repeating the first run's
+QEMU, refusing to run where it cannot, and seeds the guest's
+entropy, so runs lay memory out alike and a hash table seeded from
+the system's randomness is laid out alike too. The pinned QEMU
+fills the guest's `getrandom` from that seeded generator, the host
+still checking its flags and choosing its length
+(`nix/qemu-getrandom.patch`); a guest reading `/dev/urandom` still
+reads the host's. `--control DUMP` names a run repeating the first run's
 secret: whatever differs between the two (a clock read, a
 scheduler's choice) is *unsteady*, counted and kept out of the
 origins.

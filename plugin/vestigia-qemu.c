@@ -7,18 +7,20 @@
  *
  * For every guest instruction executed it records how many times it
  * ran, every non-sequential transfer out of it (a branch taken, a
- * call, a jump, a return) with its count, and an order-sensitive
- * fingerprint of the data addresses it touched. Two runs of a
- * program that differ only in a secret then differ exactly where
- * the execution depended on the secret: a transfer whose counts
- * differ is a secret-dependent branch, and an instruction run as
+ * call, a jump, a return) with its count, an order-sensitive
+ * fingerprint of the data addresses it touched, and an order-
+ * sensitive fingerprint of the instructions that followed it. Two
+ * runs of a program that differ only in a secret then differ exactly
+ * where the execution depended on the secret: a transfer whose counts
+ * differ is a secret-dependent branch, as is one taking the same
+ * transfers as often in another order, and an instruction run as
  * often but touching other addresses computed one from the secret.
  * Nothing needs aligning, and no taint is propagated, so effects of
  * control flow are seen as well as those of data flow.
  *
  * At exit it writes, to the file named by its `out` argument:
  *
- *   I <pc> <count> <accesses> <fingerprint> <object> <offset>
+ *   I <pc> <count> <accesses> <fingerprint> <order> <object> <offset>
  *   E <from> <to> <count>
  *
  * in hex, where <object> is the file the instruction's bytes were
@@ -43,6 +45,7 @@ typedef struct Insn {
   uint64_t count;
   uint64_t accesses;
   uint64_t fingerprint;
+  uint64_t order;   /* the successors, in the order they followed */
   GHashTable *succ; /* target pc -> count, for transfers */
 } Insn;
 
@@ -61,6 +64,7 @@ static Insn *insn_at(uint64_t pc, uint64_t size, uintptr_t haddr) {
     i->size = size;
     i->haddr = haddr;
     i->fingerprint = fnv_offset;
+    i->order = fnv_offset;
     i->succ = g_hash_table_new_full(g_int64_hash, g_int64_equal,
                                     g_free, g_free);
     g_hash_table_insert(insns, &i->pc, i);
@@ -82,8 +86,10 @@ static void transfer(Insn *from, uint64_t to) {
 static void on_exec(unsigned int vcpu, void *udata) {
   Insn *i = udata;
   (void)vcpu;
-  if (prev != NULL && i->pc != prev->pc + prev->size)
-    transfer(prev, i->pc);
+  if (prev != NULL) {
+    prev->order = (prev->order ^ i->pc) * fnv_prime;
+    if (i->pc != prev->pc + prev->size) transfer(prev, i->pc);
+  }
   prev = i;
   i->count++;
 }
@@ -169,12 +175,13 @@ static void at_exit(qemu_plugin_id_t id, void *p) {
     const Region *r = region_of(rs, i->haddr);
     if (r != NULL)
       fprintf(out, "I %" PRIx64 " %" PRIx64 " %" PRIx64 " %016" PRIx64
-              " %s %" PRIx64 "\n", i->pc, i->count, i->accesses,
-              i->fingerprint, r->path,
+              " %016" PRIx64 " %s %" PRIx64 "\n", i->pc, i->count,
+              i->accesses, i->fingerprint, i->order, r->path,
               (uint64_t)(i->haddr - r->start) + r->offset);
     else
       fprintf(out, "I %" PRIx64 " %" PRIx64 " %" PRIx64 " %016" PRIx64
-              " - 0\n", i->pc, i->count, i->accesses, i->fingerprint);
+              " %016" PRIx64 " - 0\n", i->pc, i->count, i->accesses,
+              i->fingerprint, i->order);
     GHashTableIter jt;
     gpointer tk, tn;
     g_hash_table_iter_init(&jt, i->succ);

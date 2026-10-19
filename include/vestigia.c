@@ -7,11 +7,13 @@
  * A site is reported at a run-time address, and only the loader
  * knows where it put the object holding it. On Linux, when the
  * environment names a file in VESTIGIA_OBJECTS (vestigia sets it),
- * the first secret mark writes there each loaded object's load bias
- * and path, so a site can be named by its object and its address in
- * it. That needs dl_iterate_phdr, which glibc declares only under
- * _GNU_SOURCE, set here before any header can settle the feature
- * set; this is why the marks are a compilation unit, not a header.
+ * the first secret mark of any bytes writes there each loaded
+ * object's load bias and path, so a site can be named by its object
+ * and its address in it; that the file was written is also how
+ * vestigia knows a secret was marked at all. That needs
+ * dl_iterate_phdr, which glibc declares only under _GNU_SOURCE, set
+ * here before any header can settle the feature set; this is why
+ * the marks are a compilation unit, not a header.
  */
 #ifdef __linux__
 #define _GNU_SOURCE
@@ -60,7 +62,7 @@ static void objects_(void) {}
 #endif
 
 void vestigia_secret(void *p, size_t n) {
-  objects_();
+  if (n > 0) objects_();
   (void)VALGRIND_MAKE_MEM_UNDEFINED(p, n);
 }
 
