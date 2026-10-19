@@ -21,9 +21,15 @@
         linux = pkgs.stdenv.hostPlatform.isLinux;
       in
         {
-          packages.default = v.vestigia;
-          packages.include = v.include;
-          packages.plugin = v.plugin;
+          packages = {
+            default = v.vestigia;
+            include = v.include;
+          }
+          # the plugin and the QEMU it loads run Linux guests' user
+          # mode, which exists on Linux alone
+          // lib.optionalAttrs linux {
+            plugin = v.plugin;
+          };
 
           lib = {
             inherit (v) traceOf diffOf valgrindDev;
