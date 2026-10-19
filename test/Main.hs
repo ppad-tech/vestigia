@@ -245,6 +245,11 @@ diffTests = testGroup "diff"
       M.keys (dvExecuted (restrictTo [ "lib.so" ] dv))
         @?= [ "/lib.so" ]
 
+  , testCase "a dump in which nothing ran is refused" $ do
+      isLeft (readDump "") @? "an empty dump accepted"
+      isLeft (readDump "I 10 0 0 aaaa 0 /lib.so 10\n")
+        @? "a dump of instructions never run accepted"
+
   , testCase "an unreadable line is refused" $
       isLeft (readDump "I 10 zz 0 f 0 /lib.so 0\n") @? "accepted"
   ]

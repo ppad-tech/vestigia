@@ -98,12 +98,17 @@ data Dump = Dump {
   , dpTransfers :: !(M.Map Integer (M.Map Integer Integer))
   } deriving (Eq, Show)
 
--- | Read a plugin dump.
+-- | Read a plugin dump. A dump in which no instruction ran records
+--   no run (the plugin writes every instruction the guest executed),
+--   and is refused rather than compared as one that did nothing.
 readDump :: T.Text -> Either String Dump
 readDump t = go (T.lines t) M.empty M.empty
   where
     go ls is es = case ls of
-      [] -> pure (Dump is es)
+      []
+        | any ((> 0) . inCount) (M.elems is) -> pure (Dump is es)
+        | otherwise ->
+            Left "no instruction ran: the run was not recorded"
       (l : rest) -> case T.words l of
         [ "I", pc, n, a, fp, ord, obj, off ] -> do
           i <- Insn <$> unhex pc <*> unhex n <*> unhex a <*> pure fp
