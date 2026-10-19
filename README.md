@@ -129,7 +129,8 @@ runs. `record` turns address-space randomisation off for itself and
 QEMU, refusing to run where it cannot, and seeds the guest's
 entropy, so runs lay memory out alike and a hash table seeded from
 the system's randomness is laid out alike too. The pinned QEMU
-answers the guest's `getrandom` from that seeded generator
+fills the guest's `getrandom` from that seeded generator, the host
+still checking its flags and choosing its length
 (`nix/qemu-getrandom.patch`); a guest reading `/dev/urandom` still
 reads the host's. `--control DUMP` names a run repeating the first run's
 secret: whatever differs between the two (a clock read, a
