@@ -100,13 +100,16 @@ address  0x152eb  Fq::sqrt_ratio_zeta                 invsqrt.rs:117  ...
 
 An *origin* is a branch whose outcomes differ in proportion between
 runs (a loop whose trip count the secret sets is one) or an
-instruction run equally often whose addresses differ. Instructions
-that merely ran a different number of times sit where control had
-already diverged, and are counted as downstream rather than listed.
-The report also lists, per object, the offset of every instruction
-some run executed: what the chosen secrets exercised, to set against
-what the code could execute. `--object` keeps origins, and what was
-executed, to objects whose path contains the given text.
+instruction run equally often whose addresses differ. Each origin
+names the runs that behaved alike there, grouped, and the runs that
+never reached it, each run by its dump's file name: which secrets
+the execution told apart. Instructions that merely ran a different
+number of times sit where control had already diverged, and are
+listed per object as downstream. The report also lists, per
+object, the offset of every instruction some run executed: what the
+chosen secrets exercised, to set against what the code could
+execute. `--object` keeps origins, what ran downstream, and what
+was executed, to objects whose path contains the given text.
 
 `--designed DUMP` names a run aimed at a particular path. It differs
 from the others in where it goes, not only in the secret, so it
@@ -144,7 +147,7 @@ vestigia.lib.x86_64-linux.diffOf {
 ```
 
 Each run's report is `trace.json` (`vestigia/trace-v1`) or
-`diff.json` (`vestigia/diff-v1`), beside the raw memcheck XML or
+`diff.json` (`vestigia/diff-v2`), beside the raw memcheck XML or
 plugin dumps, what the harness printed, and the run's wall time.
 
 ## Two instruments

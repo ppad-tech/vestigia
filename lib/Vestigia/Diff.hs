@@ -46,6 +46,13 @@
 -- What every run executed, per object, is reported beside: the
 -- instructions the chosen secrets exercised, and so, against what
 -- a function could execute, the part of it the comparison saw.
+--
+-- Each origin names how the runs behaved there: the runs alike at
+-- it, grouped (taking each transfer in the same proportion, at a
+-- control origin; touching the same addresses, at an address
+-- origin), and the runs that never reached it. Whether two runs
+-- that differed there both had their secrets accepted is the
+-- reader's to say, from what each run returned.
 
 module Vestigia.Diff (
     Insn(..)
@@ -121,6 +128,10 @@ data Origin =
 --   different number of times.
 data Divergence = Divergence {
     dvOrigins :: ![(Origin, Insn)]
+    -- | at each origin, the runs alike there, grouped, and the runs
+    --   that never reached it, as indices into the declared runs
+    --   then the designed (an address origin's, the declared alone)
+  , dvBehaviour :: !(M.Map (Origin, Integer) ([[Int]], [Int]))
   , dvDownstream :: ![Insn]
   , dvUnsteady :: ![Insn]
   , dvRuns :: !Int
@@ -146,9 +157,9 @@ diffControlled cs ds = diffDesigned cs ds []
 --   control origins and what was executed are every run's.
 diffDesigned :: [Dump] -> [Dump] -> [Dump] -> Divergence
 diffDesigned cs ds xs = Divergence {
-    dvOrigins = L.sortOn (inPc . snd)
-      [ o | o@(_, i) <- controls <> addresses
-          , not (inPc i `S.member` unsteady) ]
+    dvOrigins = L.sortOn (inPc . snd) origins
+  , dvBehaviour = M.fromList
+      [ ((o, inPc i), behaviourAt o (inPc i)) | (o, i) <- origins ]
   , dvDownstream = [ i | pc <- S.toAscList downstream
                        , not (pc `S.member` unsteady)
                        , Just i <- [ firstInsn pc ] ]
@@ -180,8 +191,32 @@ diffDesigned cs ds xs = Divergence {
       , fmap sig ia /= fmap sig ib || ta /= tb ]
     sig i = (inCount i, inFingerprint i)
 
+    origins = [ o | o@(_, i) <- controls <> addresses
+                  , not (inPc i `S.member` unsteady) ]
+
     -- every run, the declared first
     runs = ds <> xs
+
+    -- how the runs behaved at an origin: those that ran it, grouped
+    -- by what they did there, and those that never ran it. Only the
+    -- declared runs speak to an address.
+    behaviourAt o pc = case o of
+      ControlOrigin ->
+        ( classes proportional
+            [ (k, (inCount i, M.findWithDefault M.empty pc
+                                (dpTransfers d)))
+            | (k, d, i) <- ranIn runs ]
+        , absentIn runs )
+      AddressOrigin ->
+        ( classes (==) [ (k, inFingerprint i) | (k, _, i) <- ranIn ds ]
+        , absentIn ds )
+      where
+        ranIn rs = [ (k, d, i) | (k, d) <- zip [ 0 .. ] rs
+                               , Just i <- [ M.lookup pc (dpInsns d) ]
+                               , inCount i > 0 ]
+        absentIn rs = [ k | (k, d) <- zip [ 0 .. ] rs
+                          , maybe True ((== 0) . inCount)
+                              (M.lookup pc (dpInsns d)) ]
 
     pcs = S.unions (fmap (M.keysSet . dpInsns) runs)
     firstInsn pc = case [ i | d <- runs
@@ -238,14 +273,14 @@ diffDesigned cs ds xs = Divergence {
       , Just i <- [ firstInsn pc ]
       , inAccesses i > 0 ]
 
--- | Only the origins, and what was executed, in objects whose path
---   contains one of the given texts; downstream instructions are
---   kept, to be counted.
+-- | Only the origins, what was executed, and what ran downstream, in
+--   objects whose path contains one of the given texts.
 restrictTo :: [T.Text] -> Divergence -> Divergence
 restrictTo ps dv
   | null ps = dv
   | otherwise = dv {
         dvOrigins = filter (inside . inObject . snd) (dvOrigins dv)
+      , dvDownstream = filter (inside . inObject) (dvDownstream dv)
       , dvExecuted = M.filterWithKey (\o _ -> inside (Just o))
           (dvExecuted dv)
       }
@@ -259,11 +294,13 @@ originText o = case o of
   ControlOrigin -> "control"
   AddressOrigin -> "address"
 
--- | The report: @vestigia/diff-v1@.
+-- | The report: @vestigia/diff-v2@. Runs are named as given, the
+--   declared then the designed.
 divergenceJson
-  :: T.Text -> M.Map (T.Text, Integer) [Place] -> Divergence -> Value
-divergenceJson version places dv = Object
-  [ ("schema", String "vestigia/diff-v1")
+  :: T.Text -> [T.Text] -> M.Map (T.Text, Integer) [Place] -> Divergence
+  -> Value
+divergenceJson version names places dv = Object
+  [ ("schema", String "vestigia/diff-v2")
   , ("tool", Object [ ("name", String "vestigia")
                     , ("version", String version) ])
   , ("runs", Number (toInteger (dvRuns dv)))
@@ -283,9 +320,17 @@ divergenceJson version places dv = Object
           , ("offset", String (hex (inOffset i)))
           , ("count", Number (inCount i))
           , ("frames", Array (fmap placeJson (placesOf i)))
+          , ("groups", Array (fmap (Array . fmap named) groups))
+          , ("absent", Array (fmap named absent))
           ]
-      | (o, i) <- dvOrigins dv ])
-  , ("downstream", byObject (dvDownstream dv))
+      | (o, i) <- dvOrigins dv
+      , let (groups, absent) = M.findWithDefault ([], []) (o, inPc i)
+              (dvBehaviour dv) ])
+  , ("downstream", Object
+      [ (obj, Array (fmap (String . hex) (S.toAscList offs)))
+      | (obj, offs) <- M.toList (M.fromListWith S.union
+          [ (obj, S.singleton (inOffset i))
+          | i <- dvDownstream dv, Just obj <- [ inObject i ] ]) ])
   , ("unsteady", byObject (dvUnsteady dv))
   , ("executed", Object
       [ (o, Array (fmap (String . hex) (S.toAscList xs)))
@@ -294,6 +339,9 @@ divergenceJson version places dv = Object
   where
     count o = Number (toInteger (length
       [ () | (o', _) <- dvOrigins dv, o' == o ]))
+    named k = case drop k names of
+      (n : _) -> String n
+      [] -> String (T.pack (show k))
     byObject is = Object
       [ (o, Number (toInteger n))
       | (o, n) <- M.toList (M.fromListWith (+)
@@ -344,3 +392,12 @@ divergenceSummary places dv = T.unlines $
 
 hex :: Integer -> T.Text
 hex n = "0x" <> T.pack (showHex n "")
+
+-- keys grouped by an equivalence on their values, each group in
+-- order and the groups by their first member
+classes :: (a -> a -> Bool) -> [(Int, a)] -> [[Int]]
+classes eq ys = case ys of
+  [] -> []
+  ((k, y) : rest) ->
+    let (same, other) = L.partition (eq y . snd) rest
+    in (k : fmap fst same) : classes eq other

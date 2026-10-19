@@ -24,6 +24,7 @@ import qualified Data.Text.IO as TIO
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.Environment (getArgs, getEnvironment, lookupEnv)
 import System.Exit (ExitCode(..), exitWith)
+import System.FilePath (takeFileName)
 import System.IO (hClose, hPutStrLn, openTempFile, stderr)
 import System.Process (proc, waitForProcess, withCreateProcess)
 import qualified System.Process as P
@@ -249,8 +250,10 @@ diff o paths = do
   places <- symbolize addr2line
     [ (obj, inOffset i) | (_, i) <- dvOrigins dv
                         , Just obj <- [ inObject i ] ]
-  let doc = encode
-        (divergenceJson (T.pack (showVersion version)) places dv)
+  -- a run is named by its dump's file name, the declared first
+  let names = fmap (T.pack . takeFileName) (paths <> oDesigned o)
+      doc = encode
+        (divergenceJson (T.pack (showVersion version)) names places dv)
   maybe (TIO.putStr doc) (\p -> TIO.writeFile p doc) (oOut o)
   TIO.hPutStr stderr (divergenceSummary places dv)
   where

@@ -12,7 +12,9 @@
     * `vestigia record` and `vestigia diff`: the harness under QEMU
       with vestigia's plugin, its leakage trace summarised per
       instruction, and where runs differing only in the secret
-      diverge (vestigia/diff-v1), set against controls repeating a
+      diverge (vestigia/diff-v2: each origin with the runs alike
+      there and the runs that never reached it, and what ran
+      downstream listed per object), set against controls repeating a
       secret, with what every run executed in each object, and runs
       designed to reach particular paths compared for control and
       coverage alone (`--designed`); runs are recorded with
