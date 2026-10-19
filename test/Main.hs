@@ -154,9 +154,9 @@ diffTests = testGroup "diff"
       -- a repeat of A whose 0x20 touched other addresses: an
       -- entropy source, not the secret
       c <- either assertFailure pure (readDump (T.unlines
-        [ "I 10 4 0 aaaa /lib.so 10", "E 10 30 2"
-        , "I 20 4 4 ffff /lib.so 20", "I 30 2 0 cccc /lib.so 30"
-        , "I 40 1 1 dddd /lib.so 40" ]))
+        [ "I 10 4 0 aaaa 0 /lib.so 10", "E 10 30 2"
+        , "I 20 4 4 ffff 0 /lib.so 20", "I 30 2 0 cccc 0 /lib.so 30"
+        , "I 40 1 1 dddd 0 /lib.so 40" ]))
       let dv = diffControlled [ c ] [ a, b ]
       fmap (\(o, i) -> (o, inPc i)) (dvOrigins dv)
         @?= [ (ControlOrigin, 0x10) ]
@@ -168,9 +168,9 @@ diffTests = testGroup "diff"
       -- a run designed onto another path: 0x10 taken every time, and
       -- 0x20's addresses its own
       x <- either assertFailure pure (readDump (T.unlines
-        [ "I 10 4 0 aaaa /lib.so 10", "E 10 30 4"
-        , "I 20 4 4 9999 /lib.so 20", "I 30 4 0 cccc /lib.so 30"
-        , "I 50 1 0 eeee /lib.so 50" ]))
+        [ "I 10 4 0 aaaa 0 /lib.so 10", "E 10 30 4"
+        , "I 20 4 4 9999 0 /lib.so 20", "I 30 4 0 cccc 0 /lib.so 30"
+        , "I 50 1 0 eeee 0 /lib.so 50" ]))
       let dv = diffDesigned [] [ a, a ] [ x ]
       fmap (\(o, i) -> (o, inPc i)) (dvOrigins dv)
         @?= [ (ControlOrigin, 0x10) ]
@@ -185,8 +185,8 @@ diffTests = testGroup "diff"
       a <- either assertFailure pure (readDump dumpA)
       b <- either assertFailure pure (readDump dumpB)
       x <- either assertFailure pure (readDump (T.unlines
-        [ "I 10 4 0 aaaa /lib.so 10", "E 10 30 4"
-        , "I 20 4 4 9999 /lib.so 20", "I 30 4 0 cccc /lib.so 30" ]))
+        [ "I 10 4 0 aaaa 0 /lib.so 10", "E 10 30 4"
+        , "I 20 4 4 9999 0 /lib.so 20", "I 30 4 0 cccc 0 /lib.so 30" ]))
       -- at the branch, the first and third runs alike; the designed
       -- run is a control origin's to group, and the address origin
       -- speaks only of the declared runs
@@ -203,13 +203,29 @@ diffTests = testGroup "diff"
   , testCase "downstream is kept to the objects under audit" $ do
       a <- either assertFailure pure (readDump dumpA)
       b <- either assertFailure pure (readDump (T.unlines
-        [ "I 10 4 0 aaaa /lib.so 10", "E 10 30 3"
-        , "I 20 4 4 bbbb /lib.so 20", "I 30 3 0 cccc /lib.so 30"
-        , "I 40 1 1 dddd /lib.so 40", "I 60 2 0 ffff /libc.so 60" ]))
+        [ "I 10 4 0 aaaa 0 /lib.so 10", "E 10 30 3"
+        , "I 20 4 4 bbbb 0 /lib.so 20", "I 30 3 0 cccc 0 /lib.so 30"
+        , "I 40 1 1 dddd 0 /lib.so 40", "I 60 2 0 ffff 0 /libc.so 60" ]))
       let dv = diffDumps [ a, b ]
       fmap inPc (dvDownstream dv) @?= [ 0x30, 0x60 ]
       fmap inPc (dvDownstream (restrictTo [ "lib.so" ] dv))
         @?= [ 0x30 ]
+
+  , testCase "a branch taken as often, in another order, is an origin" $ do
+      -- 0x10 runs twice and falls through once and jumps once in both
+      -- runs, but in the other order
+      a <- either assertFailure pure (readDump (T.unlines
+        [ "I 10 2 0 aaaa 1111 /lib.so 10", "E 10 30 1"
+        , "I 20 1 0 bbbb 0 /lib.so 20", "I 30 1 0 cccc 0 /lib.so 30" ]))
+      b <- either assertFailure pure (readDump (T.unlines
+        [ "I 10 2 0 aaaa 2222 /lib.so 10", "E 10 30 1"
+        , "I 20 1 0 bbbb 0 /lib.so 20", "I 30 1 0 cccc 0 /lib.so 30" ]))
+      fmap (\(o, i) -> (o, inPc i)) (dvOrigins (diffDumps [ a, b ]))
+        @?= [ (ControlOrigin, 0x10) ]
+      M.lookup (ControlOrigin, 0x10) (dvBehaviour (diffDumps [ a, b, a ]))
+        @?= Just ([ [ 0, 2 ], [ 1 ] ], [])
+      -- in the same order, nothing
+      dvOrigins (diffDumps [ a, a ]) @?= []
 
   , testCase "identical runs have no origins" $ do
       a <- either assertFailure pure (readDump dumpA)
@@ -220,8 +236,8 @@ diffTests = testGroup "diff"
   , testCase "what any run executed is kept per object" $ do
       a <- either assertFailure pure (readDump dumpA)
       b <- either assertFailure pure (readDump (T.unlines
-        [ "I 10 4 0 aaaa /lib.so 10", "I 50 1 0 eeee /lib.so 50"
-        , "I 60 1 0 ffff /libc.so 60", "I 70 0 0 0000 /lib.so 70" ]))
+        [ "I 10 4 0 aaaa 0 /lib.so 10", "I 50 1 0 eeee 0 /lib.so 50"
+        , "I 60 1 0 ffff 0 /libc.so 60", "I 70 0 0 0000 0 /lib.so 70" ]))
       let dv = diffDumps [ a, b ]
       dvExecuted dv @?= M.fromList
         [ ("/lib.so", S.fromList [ 0x10, 0x20, 0x30, 0x40, 0x50 ])
@@ -230,31 +246,31 @@ diffTests = testGroup "diff"
         @?= [ "/lib.so" ]
 
   , testCase "an unreadable line is refused" $
-      isLeft (readDump "I 10 zz 0 f /lib.so 0\n") @? "accepted"
+      isLeft (readDump "I 10 zz 0 f 0 /lib.so 0\n") @? "accepted"
   ]
   where
     -- 0x10 is a branch run four times, taken twice in A and three
     -- times in B; 0x20 reads other addresses in B; 0x30, inside the
     -- branch, runs a different number of times; 0x40 is the same
     dumpA = T.unlines
-      [ "I 10 4 0 aaaa /lib.so 10", "E 10 30 2"
-      , "I 20 4 4 bbbb /lib.so 20", "I 30 2 0 cccc /lib.so 30"
-      , "I 40 1 1 dddd /lib.so 40" ]
+      [ "I 10 4 0 aaaa 0 /lib.so 10", "E 10 30 2"
+      , "I 20 4 4 bbbb 0 /lib.so 20", "I 30 2 0 cccc 0 /lib.so 30"
+      , "I 40 1 1 dddd 0 /lib.so 40" ]
     dumpB = T.unlines
-      [ "I 10 4 0 aaaa /lib.so 10", "E 10 30 3"
-      , "I 20 4 4 eeee /lib.so 20", "I 30 3 0 cccc /lib.so 30"
-      , "I 40 1 1 dddd /lib.so 40" ]
+      [ "I 10 4 0 aaaa 0 /lib.so 10", "E 10 30 3"
+      , "I 20 4 4 eeee 0 /lib.so 20", "I 30 3 0 cccc 0 /lib.so 30"
+      , "I 40 1 1 dddd 0 /lib.so 40" ]
     -- a loop at 0x10 the secret runs 5 or 9 times, its back edge to
     -- 0x14 taken every time but the last; 0x18, in the body, always
     -- jumps back to 0x10
     loopA = T.unlines
-      [ "I 10 5 0 aaaa /lib.so 10", "E 10 14 4"
-      , "I 14 4 0 bbbb /lib.so 14"
-      , "I 18 4 0 cccc /lib.so 18", "E 18 10 4" ]
+      [ "I 10 5 0 aaaa 0 /lib.so 10", "E 10 14 4"
+      , "I 14 4 0 bbbb 0 /lib.so 14"
+      , "I 18 4 0 cccc 0 /lib.so 18", "E 18 10 4" ]
     loopB = T.unlines
-      [ "I 10 9 0 aaaa /lib.so 10", "E 10 14 8"
-      , "I 14 8 0 bbbb /lib.so 14"
-      , "I 18 8 0 cccc /lib.so 18", "E 18 10 8" ]
+      [ "I 10 9 0 aaaa 0 /lib.so 10", "E 10 14 8"
+      , "I 14 8 0 bbbb 0 /lib.so 14"
+      , "I 18 8 0 cccc 0 /lib.so 18", "E 18 10 8" ]
 
 symbolTests :: TestTree
 symbolTests = testGroup "symbol"

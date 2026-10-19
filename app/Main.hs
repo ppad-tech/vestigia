@@ -14,7 +14,7 @@ module Main (
   ) where
 
 import Control.Exception (IOException, try)
-import Control.Monad (unless)
+import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
 import Data.Version (showVersion)
 import qualified Data.Text as T
@@ -183,6 +183,13 @@ run o prog progArgs = do
       exitWith (ExitFailure 2)
     Right v -> pure v
   removeFile objects
+  -- no objects written, no secret marked: a run that found nothing
+  -- because nothing was secret is no evidence, and is refused
+  when (null os) $ do
+    hPutStrLn stderr "vestigia: the harness marked no secret \
+      \(vestigia_secret was never called on any bytes); its run \
+      \says nothing"
+    exitWith (ExitFailure 2)
   report o (Just (exitCode code)) os xml
   if temporary then removeFile xml else pure ()
   where
@@ -222,9 +229,10 @@ record o prog progArgs = do
   -- same entropy: a hash table seeded from the operating system's
   -- randomness is laid out anew in every process
   fixed <- fixLayout
-  unless fixed $ hPutStrLn stderr
-    "vestigia: address randomisation is still on; runs may differ \
-    \in layout, and so everywhere"
+  unless fixed $ do
+    hPutStrLn stderr "vestigia: address randomisation could not be \
+      \turned off; runs would differ in layout, and so everywhere"
+    exitWith (ExitFailure 2)
   qemu <- tool (oQemu o) "VESTIGIA_QEMU" "qemu-x86_64"
   plugin <- tool (oPlugin o) "VESTIGIA_PLUGIN" "libvestigia-qemu.so"
   r <- try (withCreateProcess

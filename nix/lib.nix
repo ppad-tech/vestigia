@@ -22,8 +22,14 @@ let
 
   # the QEMU plugin recording a run's leakage trace per
   # instruction, and the QEMU that runs a harness of this
-  # system's ISA under it
-  qemu = pkgs.qemu;
+  # system's ISA under it: user mode alone, its guest's getrandom
+  # drawn from the generator -seed fixes (qemu-getrandom.patch)
+  qemu = (pkgs.qemu.override {
+    userOnly = true;
+    hostCpuTargets = [ "x86_64-linux-user" "aarch64-linux-user" ];
+  }).overrideAttrs (o: {
+    patches = (o.patches or [ ]) ++ [ ./qemu-getrandom.patch ];
+  });
   qemuFor = {
     x86_64 = "${qemu}/bin/qemu-x86_64";
     aarch64 = "${qemu}/bin/qemu-aarch64";

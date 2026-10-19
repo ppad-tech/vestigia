@@ -17,11 +17,13 @@
 -- branch whose outcomes differ in proportion between runs had its
 -- own condition depend on the secret, and is a `control` origin
 -- (a loop whose trip count the secret sets is one, though it also
--- runs a different number of times). An instruction run equally
--- often in every run whose addresses differ computed one from the
--- secret: an `address` origin. Every other instruction run a
--- different number of times sits where control had already
--- diverged: it is downstream, and is counted rather than listed.
+-- runs a different number of times). So is a branch run as often,
+-- taking each transfer as often, in another order: the plugin keeps
+-- an order-sensitive fingerprint of what followed each instruction.
+-- An instruction run equally often in every run whose addresses
+-- differ computed one from the secret: an `address` origin. Every
+-- other instruction run a different number of times sits where
+-- control had already diverged: it is downstream.
 --
 -- Unlike memcheck's taint, this sees what control flow does to
 -- data as well as what data does: a value chosen by a secret
@@ -83,6 +85,8 @@ data Insn = Insn {
   , inCount :: !Integer
   , inAccesses :: !Integer
   , inFingerprint :: !T.Text
+    -- | what followed it, in order, fingerprinted
+  , inOrder :: !T.Text
   , inObject :: !(Maybe T.Text)
   , inOffset :: !Integer
   } deriving (Eq, Show)
@@ -101,8 +105,9 @@ readDump t = go (T.lines t) M.empty M.empty
     go ls is es = case ls of
       [] -> pure (Dump is es)
       (l : rest) -> case T.words l of
-        [ "I", pc, n, a, fp, obj, off ] -> do
+        [ "I", pc, n, a, fp, ord, obj, off ] -> do
           i <- Insn <$> unhex pc <*> unhex n <*> unhex a <*> pure fp
+                    <*> pure ord
                     <*> pure (if obj == "-" then Nothing else Just obj)
                     <*> unhex off
           go rest (M.insert (inPc i) i is) es
@@ -189,7 +194,7 @@ diffDesigned cs ds xs = Divergence {
             ta = M.lookup pc (dpTransfers a)
             tb = M.lookup pc (dpTransfers b)
       , fmap sig ia /= fmap sig ib || ta /= tb ]
-    sig i = (inCount i, inFingerprint i)
+    sig i = (inCount i, inFingerprint i, inOrder i)
 
     origins = [ o | o@(_, i) <- controls <> addresses
                   , not (inPc i `S.member` unsteady) ]
@@ -202,9 +207,9 @@ diffDesigned cs ds xs = Divergence {
     -- declared runs speak to an address.
     behaviourAt o pc = case o of
       ControlOrigin ->
-        ( classes proportional
+        ( classes outcomesAlike
             [ (k, (inCount i, M.findWithDefault M.empty pc
-                                (dpTransfers d)))
+                                (dpTransfers d), inOrder i))
             | (k, d, i) <- ranIn runs ]
         , absentIn runs )
       AddressOrigin ->
@@ -236,10 +241,11 @@ diffDesigned cs ds xs = Divergence {
     steadyDeclared = S.filter (alike . countsIn ds)
       (S.unions (fmap (M.keysSet . dpInsns) ds))
 
-    -- an instruction's run count and transfers, in each run that ran
-    -- it
+    -- an instruction's run count, transfers, and the order of what
+    -- followed it, in each run that ran it
     ranAt pc =
-      [ (inCount i, M.findWithDefault M.empty pc (dpTransfers d))
+      [ ( inCount i, M.findWithDefault M.empty pc (dpTransfers d)
+        , inOrder i )
       | d <- runs, Just i <- [ M.lookup pc (dpInsns d) ]
       , inCount i > 0 ]
     transferSources = S.unions (fmap (M.keysSet . dpTransfers) runs)
@@ -250,8 +256,12 @@ diffDesigned cs ds xs = Divergence {
       M.keysSet ts == M.keysSet ts'
         && and (M.elems (M.intersectionWith (\e e' -> e * c' == e' * c)
                            ts ts'))
+    -- outcomes alike: each target taken in the same proportion and,
+    -- where it ran as often, in the same order
+    outcomesAlike (c, ts, o) (c', ts', o') =
+      proportional (c, ts) (c', ts') && (c /= c' || o == o')
     divergent pc = case ranAt pc of
-      (r : rest) -> not (all (proportional r) rest)
+      (r : rest) -> not (all (outcomesAlike r) rest)
       [] -> False
 
     controlPcs = S.filter divergent transferSources

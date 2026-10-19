@@ -1,0 +1,22 @@
+QEMU's user mode answers a guest's getrandom from the host, which
+-seed does not reach: two runs of one program draw different entropy,
+and every instruction computing on it differs between them. Draw it
+from the guest generator instead, which -seed makes deterministic and
+which, unseeded, draws from the host as before.
+
+--- a/linux-user/syscall.c
++++ b/linux-user/syscall.c
+@@ -10898,7 +10898,12 @@
+         if (!p) {
+             return -TARGET_EFAULT;
+         }
+-        ret = get_errno(getrandom(p, arg2, arg3));
++        /*
++         * The guest's entropy, from the generator -seed makes
++         * deterministic; unseeded, it draws from the host as before.
++         */
++        qemu_guest_getrandom_nofail(p, arg2);
++        ret = arg2;
+         unlock_user(p, arg1, ret);
+         return ret;
+ #endif
