@@ -22,6 +22,7 @@ module Vestigia.Trace (
   , Site(..)
   , Trace(..)
   , trace
+  , sitesIn
   , withObjects
   , readObjects
   , objectOffset
@@ -117,6 +118,18 @@ trace mc = Trace {
     order = L.nub (fmap (\((c, top), _) -> (c, frIp top)) tagged)
     grouped = M.fromListWith (flip (<>))
       [ ((c, frIp top), [ (top, e) ]) | ((c, top), e) <- tagged ]
+
+-- | Only the sites in objects whose path contains one of the given
+--   texts, as a differential run keeps its origins; every site when
+--   none is given.
+sitesIn :: [T.Text] -> Trace -> Trace
+sitesIn ts tr
+  | null ts = tr
+  | otherwise = tr { trSites = filter inside (trSites tr) }
+  where
+    inside s = case frObj (siFrame s) of
+      Just o -> any (`T.isInfixOf` o) ts
+      Nothing -> False
 
 -- | The trace with the harness's map of its objects, by which each
 --   frame is named by its address in its object.

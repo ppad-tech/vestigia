@@ -76,7 +76,9 @@ Here the modulus compares in decoding the secret scalar, its
 canonicality check, and the double-and-add of the scalar
 multiplication, which iterates about 245 times per call on the
 secret's bits. `vestigia read FILE.xml` gives the same report from a
-memcheck run made elsewhere.
+memcheck run made elsewhere. `--object TEXT` keeps the sites in
+objects whose path contains the given text, as it keeps a
+differential run's origins.
 
 ### Differential traces: `vestigia record` and `vestigia diff`
 
@@ -142,10 +144,11 @@ origins.
 The flake's `lib.<system>` holds `traceOf` and `diffOf`, which run a
 harness under either instrument as a derivation: a run for
 `x86_64-linux` then executes on whatever builds for that system, and
-its report is cached like any other output. `diffOf` repeats the
-first run as its control. `nix/lib.nix` holds the same definitions
-for one package set, for a consumer that pins vestigia and builds
-traces with its own nixpkgs.
+its report is cached like any other output. Either takes `objects`,
+the texts `--object` is given. `diffOf` repeats the first run as its
+control. `nix/lib.nix` holds the same definitions for one package
+set, for a consumer that pins vestigia and builds traces with its own
+nixpkgs, beside `version`, the version the command reports.
 
 ```nix
 vestigia.lib.x86_64-linux.diffOf {

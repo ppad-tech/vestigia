@@ -38,7 +38,7 @@ import Vestigia.Layout (fixLayout)
 import Vestigia.Memcheck (readMemcheck)
 import Vestigia.Symbol (symbolize)
 import Vestigia.Trace
-  (readObjects, trace, traceJson, traceSummary, withObjects)
+  (readObjects, sitesIn, trace, traceJson, traceSummary, withObjects)
 
 data Opts = Opts {
     oValgrind :: !(Maybe FilePath)
@@ -82,8 +82,8 @@ usage e = do
   hPutStrLn stderr $ unlines
     [ "usage:"
     , "  vestigia run [--valgrind PATH] [--xml FILE] [--out FILE] \
-      \-- PROGRAM [ARG...]"
-    , "  vestigia read [--out FILE] FILE.xml"
+      \[--object TEXT]... -- PROGRAM [ARG...]"
+    , "  vestigia read [--out FILE] [--object TEXT]... FILE.xml"
     , "  vestigia record [--qemu PATH] [--plugin PATH] --dump FILE \
       \-- PROGRAM [ARG...]"
     , "  vestigia diff [--out FILE] [--addr2line PATH] \
@@ -94,6 +94,7 @@ usage e = do
     , "branch and address that depended on bytes the program marked"
     , "secret (vestigia.h), and writes the report (vestigia/trace-v1)."
     , "valgrind is --valgrind, else $VESTIGIA_VALGRIND, else on PATH."
+    , "--object keeps sites in objects whose path contains TEXT."
     , ""
     , "record executes PROGRAM under QEMU with vestigia's plugin and"
     , "dumps its leakage trace per instruction; diff compares dumps"
@@ -209,7 +210,7 @@ report o exit os xml = do
       hPutStrLn stderr ("vestigia: " <> xml <> ": " <> e)
       exitWith (ExitFailure 2)
     Right mc -> do
-      let tr = withObjects os (trace mc)
+      let tr = sitesIn (oObjects o) (withObjects os (trace mc))
           doc = encode
             (traceJson (T.pack (showVersion version)) exit tr)
       maybe (TIO.putStr doc) (\p -> TIO.writeFile p doc) (oOut o)

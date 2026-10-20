@@ -72,17 +72,19 @@ let
   '';
 
   # one harness run under memcheck, as a derivation: its report,
-  # memcheck's XML, and what the harness printed. A harness that
+  # memcheck's XML, and what the harness printed. `objects` keeps
+  # sites in objects whose path contains one of them. A harness that
   # fails still leaves a report of what ran; a run vestigia could
   # not read fails the build.
-  traceOf = { name, harness, args ? [ ] }:
+  traceOf = { name, harness, args ? [ ], objects ? [ ] }:
     pkgs.runCommand "vestigia-trace-${name}" { } ''
       mkdir -p $out
       start=$(date +%s%N)
       set +e
       ${vestigia}/bin/vestigia run \
         --xml $out/memcheck.xml --out $out/trace.json \
-        -- ${harness} ${lib.escapeShellArgs args} \
+        ${lib.concatMapStrings (o: "--object ${lib.escapeShellArg o} ")
+          objects}-- ${harness} ${lib.escapeShellArgs args} \
         > $out/stdout 2> $out/stderr
       echo $? > $out/status
       set -e
@@ -139,8 +141,11 @@ let
           runs}2> $out/summary
       echo $(( ($(date +%s%N) - start) / 1000000 )) > $out/milliseconds
     '';
+  # the version the cabal file declares, which the command reports
+  version = builtins.head (builtins.match ".*\nversion: *([0-9.]+).*"
+    (builtins.readFile (src + "/vestigia.cabal")));
 in
 {
-  inherit hpkgs vestigia plugin include traceOf diffOf;
+  inherit hpkgs vestigia plugin include traceOf diffOf version;
   valgrindDev = valgrind.dev;
 }
