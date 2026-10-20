@@ -131,6 +131,18 @@ diffTests = testGroup "diff"
       dpTransfers d @?= M.fromList
         [ (0x10, M.fromList [ (0x30, 2) ]) ]
 
+  , testCase "a run's objects are where its instructions put them" $ do
+      a <- either assertFailure pure (readDump dumpA)
+      loadBases a @?= M.fromList [ ("/lib.so", 0) ]
+      -- the same run with /lib.so loaded 0x1000 higher
+      b <- either assertFailure pure (readDump (T.unlines
+        [ "I 1010 4 0 aaaa 0 /lib.so 10", "E 1010 1030 2"
+        , "I 1020 4 4 bbbb 0 /lib.so 20", "I 1030 2 0 cccc 0 /lib.so 30"
+        , "I 1040 1 1 dddd 0 /lib.so 40" ]))
+      loadBases b @?= M.fromList [ ("/lib.so", 0x1000) ]
+      layoutApart a b @?= [ ("/lib.so", 0, 0x1000) ]
+      layoutApart a a @?= []
+
   , testCase "origins are where steady instructions differ" $ do
       a <- either assertFailure pure (readDump dumpA)
       b <- either assertFailure pure (readDump dumpB)
