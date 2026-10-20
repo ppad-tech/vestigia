@@ -32,7 +32,7 @@
           };
 
           lib = {
-            inherit (v) traceOf diffOf valgrindDev;
+            inherit (v) traceOf diffOf valgrindDev version;
           };
 
           checks.default = hpkgs.vestigia;

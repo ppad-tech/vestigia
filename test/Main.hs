@@ -108,6 +108,12 @@ traceTests = testGroup "trace"
         @?= Just 0x401000
       objectOffset os (f "/lib/libc.so.6" 0x7000) @?= Nothing
 
+  , testCase "a site is kept to the objects named" $ do
+      tr <- trace <$> fixture "probe.xml"
+      length (trSites (sitesIn [ "probe" ] tr)) @?= 2
+      trSites (sitesIn [ "libc" ] tr) @?= []
+      length (trSites (sitesIn [] tr)) @?= 2
+
   , testCase "one site per instruction, whatever called it" $ do
       tr <- trace <$> either assertFailure pure (readMemcheck twoCallers)
       fmap (\s -> (frIp (siFrame s), siCount s, length (siStacks s)))

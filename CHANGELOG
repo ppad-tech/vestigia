@@ -23,4 +23,8 @@
       its getrandom included, seeded. A taint run that marked no
       secret is refused.
   * `traceOf` and `diffOf` run either as a derivation;
-    `nix/lib.nix` holds them for any package set.
+    `nix/lib.nix` holds them for any package set, with the version
+    the command reports.
+  * `--object` keeps a taint run's sites (`run`, `read`, and
+    `traceOf`'s `objects`) to objects whose path contains the given
+    text, as it keeps a differential run's origins.
