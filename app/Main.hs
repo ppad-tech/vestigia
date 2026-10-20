@@ -17,6 +17,7 @@ import Control.Exception (IOException, try)
 import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
 import Data.Version (showVersion)
+import Numeric (showHex)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
@@ -32,7 +33,7 @@ import qualified System.Process as P
 import Paths_vestigia (version)
 import Vestigia.Diff
   (diffDesigned, divergenceJson, divergenceSummary, dvOrigins,
-   inObject, inOffset, readDump, restrictTo)
+   inObject, inOffset, layoutApart, readDump, restrictTo)
 import Vestigia.Json (encode)
 import Vestigia.Layout (fixLayout)
 import Vestigia.Memcheck (readMemcheck)
@@ -236,10 +237,27 @@ record o prog progArgs = do
     exitWith (ExitFailure 2)
   qemu <- tool (oQemu o) "VESTIGIA_QEMU" "qemu-x86_64"
   plugin <- tool (oPlugin o) "VESTIGIA_PLUGIN" "libvestigia-qemu.so"
+  -- QEMU maps the guest's libraries and heap in its own address
+  -- space, wherever its own allocations leave room, and those vary
+  -- with how its threads run: a second malloc arena, or a large block
+  -- mapped rather than drawn from the heap, takes the room the
+  -- guest's next mapping would have had, and under load one run lays
+  -- out apart from another. One arena, and large blocks drawn from
+  -- the heap, keep QEMU's allocations off the guest's mappings. The
+  -- guest keeps its own setting of the variable, or has none
+  environment <- getEnvironment
+  let tunables = "GLIBC_TUNABLES"
+      host = "glibc.malloc.arena_max=1:glibc.malloc.mmap_threshold="
+        <> "33554432"
+      guest = maybe [ "-U", tunables ]
+        (\v -> [ "-E", tunables <> "=" <> v ]) (lookup tunables environment)
   r <- try (withCreateProcess
-         (proc qemu ([ "-seed", "0"
-                     , "-plugin", plugin <> ",out=" <> dump, prog ]
+         ((proc qemu (guest
+                     <> [ "-seed", "0"
+                        , "-plugin", plugin <> ",out=" <> dump, prog ]
                      <> progArgs))
+            { P.env = Just ((tunables, host)
+                : filter ((/= tunables) . fst) environment) })
          (\_ _ _ ph -> waitForProcess ph))
   case r of
     Left e -> do
@@ -254,6 +272,23 @@ diff o paths = do
   dumps <- traverse readOne paths
   controls <- traverse readOne (oControls o)
   designed <- traverse readOne (oDesigned o)
+  -- runs laid out apart differ wherever they touch memory, not by
+  -- the secret: such runs are refused, not compared
+  case zip paths dumps of
+    ((p0, first) : _) -> case
+        [ (p, obj, x, y)
+        | (p, d) <- zip (paths <> oControls o <> oDesigned o)
+                        (dumps <> controls <> designed)
+        , (obj, x, y) <- take 1 (layoutApart first d) ] of
+      ((p, obj, x, y) : _) -> do
+        hPutStrLn stderr ("vestigia: " <> p <> " loaded "
+          <> T.unpack obj <> " at 0x" <> showHex y "" <> " where "
+          <> p0 <> " loaded it at 0x"
+          <> showHex x "" <> "; runs laid out apart differ wherever \
+             \they touch memory, not by the secret, and are not compared")
+        exitWith (ExitFailure 2)
+      [] -> pure ()
+    [] -> pure ()
   let dv = restrictTo (oObjects o)
         (diffDesigned controls dumps designed)
   places <- symbolize addr2line

@@ -89,8 +89,12 @@ every instruction some run executed is listed as coverage.
 
 `record` disables address-space randomisation and seeds the guest's
 entropy, `getrandom` included (`nix/qemu-getrandom.patch`), so runs
-lay memory out alike. A guest reading `/dev/urandom` still reads the
-host's.
+lay memory out alike. QEMU maps the guest wherever its own
+allocations leave room, which under load can differ between runs, so
+`record` keeps QEMU's allocations off the guest's mappings (one malloc
+arena, large blocks from the heap), and `diff` refuses runs that
+loaded an object at different addresses. A guest reading
+`/dev/urandom` still reads the host's.
 
 ### As derivations
 

@@ -66,6 +66,8 @@ module Vestigia.Diff (
   , diffControlled
   , diffDesigned
   , restrictTo
+  , loadBases
+  , layoutApart
   , divergenceJson
   , divergenceSummary
   ) where
@@ -126,6 +128,25 @@ readDump t = go (T.lines t) M.empty M.empty
     unhex x = case readHex (T.unpack x) of
       [ (v, "") ] -> pure v
       _ -> Left ("not hexadecimal: " <> T.unpack x)
+
+-- | Where a run loaded each object it executed: any of its
+--   instructions' addresses less its offset in the object.
+loadBases :: Dump -> M.Map T.Text Integer
+loadBases d = M.fromList
+  [ (o, inPc i - inOffset i)
+  | i <- M.elems (dpInsns d), Just o <- [ inObject i ] ]
+
+-- | The objects two runs both executed but loaded at different
+--   addresses, each with where the first run put it and where the
+--   second did. Runs laid out apart touch other addresses wherever
+--   they touch memory, so comparing them says nothing of the
+--   secret.
+layoutApart :: Dump -> Dump -> [(T.Text, Integer, Integer)]
+layoutApart a b =
+  [ (o, x, y)
+  | (o, (x, y)) <- M.toList
+      (M.intersectionWith (,) (loadBases a) (loadBases b))
+  , x /= y ]
 
 -- | How an origin depended on the secret.
 data Origin =
