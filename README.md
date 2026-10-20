@@ -7,13 +7,13 @@ secret, by running it.
 
 vestigia executes a harness, reports every instruction that branched
 on the secret or computed an address from it, and names each by
-function and source line. It needs no timing statistics, is exact on
-the paths executed, and judges the machine code as built.
+function and source line.
 
-A clean report is not a proof of constant-time execution. It covers
-only the paths the harness drove, and the discipline rather than the
-hardware: a leak through a prefetcher or a variable-latency
-multiplier is for a timing instrument such as ppad's censor.
+A clean report is not a proof of constant-time execution. It
+covers only the paths the harness drove, and the discipline
+rather than the hardware: a leak through a prefetcher or a
+variable-latency multiplier is for a timing instrument such as ppad's
+[censor](https://github.com/ppad-tech/censor).
 
 ## Usage
 
