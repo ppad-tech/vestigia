@@ -70,28 +70,36 @@ let
     ln -s ${include}/include $out/include
   '';
 
-  # one harness run under memcheck, as a derivation: its report,
-  # memcheck's XML, and what the harness printed. `objects` keeps
-  # sites in objects whose path contains one of them. A harness that
-  # fails still leaves a report of what ran; a run vestigia could
-  # not read fails the build.
-  traceOf = { name, harness, args ? [ ], objects ? [ ] }:
+  # runs of one harness under memcheck, as a derivation: each run
+  # kept (run-K: memcheck's XML, the objects its harness reported,
+  # its exit status, its own report), what each printed, and the
+  # report over all of them. `runs` is a list of argument lists, the
+  # secrets of the trace; memcheck sees only the path a run takes, so
+  # each run adds the sites on its own. `objects` keeps sites in
+  # objects whose path contains one of them. A harness that fails
+  # still leaves a report of what ran; a run vestigia could not read
+  # fails the build.
+  traceOf = { name, harness, runs, objects ? [ ] }:
     pkgs.runCommand "vestigia-trace-${name}" { } ''
       mkdir -p $out
       start=$(date +%s%N)
-      set +e
-      ${vestigia}/bin/vestigia run \
-        --xml $out/memcheck.xml --out $out/trace.json \
+      ${lib.concatImapStrings (k: args: ''
+        set +e
+        ${vestigia}/bin/vestigia run --dir $out/run-${toString k} \
+          --out $out/run-${toString k}/trace.json \
+          -- ${harness} ${lib.escapeShellArgs args} \
+          > $out/stdout-${toString k} 2> $out/stderr-${toString k}
+        echo $? > $out/status-${toString k}
+        set -e
+      '') runs}
+      ${vestigia}/bin/vestigia read --out $out/trace.json \
         ${lib.concatMapStrings (o: "--object ${lib.escapeShellArg o} ")
-          objects}-- ${harness} ${lib.escapeShellArgs args} \
-        > $out/stdout 2> $out/stderr
-      echo $? > $out/status
-      set -e
-      echo $(( ($(date +%s%N) - start) / 1000000 )) > $out/milliseconds
-      test -s $out/trace.json || {
-        cat $out/stderr >&2
+          objects}${lib.concatImapStrings (k: _:
+          "$out/run-${toString k} ") runs} 2> $out/summary || {
+        cat $out/summary >&2
         exit 1
       }
+      echo $(( ($(date +%s%N) - start) / 1000000 )) > $out/milliseconds
     '';
 
   # runs of one harness that differ only in a secret, each

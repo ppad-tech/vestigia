@@ -49,10 +49,14 @@ control  0x4875cd2  MontConfig::from_bigint      montgomery_backend.rs:359  x8
 control  0x4875cf9  cmp<4>                       mod.rs:565  x4
 ...
 control  0x4878d4d  next<&[u64]>                 bits.rs:32  x982
-12 secret-dependent site(s); 0 unrelated; 0 fault(s)
+12 secret-dependent site(s) over 1 run(s); 0 unrelated; 0 fault(s)
 ```
 
-`vestigia read FILE.xml` reports on a memcheck run made elsewhere.
+memcheck sees only the path a run takes, so trace a harness on
+several secrets: `run --dir DIR` keeps a run (memcheck's XML, where
+the harness's objects loaded, its exit status), and `vestigia read
+DIR...` reports on such runs as one, each site with the runs that
+reached it. `read` takes a memcheck XML file made elsewhere too.
 `--object TEXT` keeps the sites in objects whose path contains TEXT.
 
 ### Differential traces: `vestigia record` and `vestigia diff`
@@ -112,10 +116,11 @@ first run's arguments.
 ### As derivations
 
 The flake's `lib.<system>` holds `traceOf` and `diffOf`, which run
-either instrument as a derivation; an `x86_64-linux` run executes on
-any builder for that system, and its report is cached. `diffOf`
-repeats the first run as its control. `nix/lib.nix` holds the same
-for a consumer's own nixpkgs, beside `version`.
+either instrument as a derivation over a list of runs; an
+`x86_64-linux` run executes on any builder for that system, and its
+report is cached. `diffOf` repeats the first run as its control.
+`nix/lib.nix` holds the same for a consumer's own nixpkgs, beside
+`version`.
 
 ```nix
 vestigia.lib.x86_64-linux.diffOf {
@@ -126,8 +131,8 @@ vestigia.lib.x86_64-linux.diffOf {
 }
 ```
 
-The output holds `trace.json` (`vestigia/trace-v1`) or `diff.json`
-(`vestigia/diff-v3`), the raw memcheck XML or plugin dumps, what the
+The output holds `trace.json` (`vestigia/trace-v2`) or `diff.json`
+(`vestigia/diff-v3`), the runs kept or the plugin's dumps, what the
 harness printed, and the wall time.
 
 ## Two instruments

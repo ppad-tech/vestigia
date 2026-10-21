@@ -8,9 +8,11 @@
     * `vestigia run`: the harness under memcheck with the secret's
       bytes undefined, reporting each branch, address, and integer
       division operand computed from them, the last through a
-      memcheck patch, each at its own instruction
-      (vestigia/trace-v1); `vestigia read` reports from memcheck's
-      XML.
+      memcheck patch, each at its own instruction; `--dir` keeps the
+      run, and `vestigia read` reports on several kept runs, or
+      memcheck XML made elsewhere, as one (vestigia/trace-v2: each
+      run with its command, exit, and objects, each site with the
+      runs that reached it).
     * `vestigia record` and `vestigia diff`: the harness under QEMU
       with vestigia's plugin, its leakage trace summarised per
       instruction, and where runs differing only in the secret
@@ -34,7 +36,8 @@
       not repeat the first run's arguments; a guest that starts a
       second thread is stopped and its dump refused. A taint run
       that marked no secret is refused.
-  * `traceOf` and `diffOf` run either as a derivation;
+  * `traceOf` and `diffOf` run either as a derivation, over a list
+    of runs;
     `nix/lib.nix` holds them for any package set, with the version
     the command reports.
   * `--object` keeps a taint run's sites (`run`, `read`, and

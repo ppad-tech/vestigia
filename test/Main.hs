@@ -79,21 +79,19 @@ memcheckTests = testGroup "memcheck"
 traceTests :: TestTree
 traceTests = testGroup "trace"
   [ testCase "the probe's secret addresses are its sites" $ do
-      tr <- trace <$> fixture "probe.xml"
-      fmap (\s -> (siClass s, frFn (siFrame s), frLine (siFrame s)))
-          (trSites tr)
+      tr <- one <$> fixture "probe.xml"
+      fmap (\s -> (siClass s, frFn (at s), frLine (at s))) (trSites tr)
         @?= [ (Address, Just "lookup", Just 16)
             , (Address, Just "main", Just 33) ]
       trUnrelated tr @?= []
       trFaults tr @?= []
 
   , testCase "only a secret's descendants are sites" $ do
-      tr <- trace <$> either assertFailure pure (readMemcheck mixed)
-      fmap (\s -> (siClass s, frIp (siFrame s), siCount s))
-          (trSites tr)
+      tr <- one <$> either assertFailure pure (readMemcheck mixed)
+      fmap (\s -> (siClass s, frIp (at s), siCount s)) (trSites tr)
         @?= [ (Control, 0x10, 5) ]
-      fmap meKind (trUnrelated tr) @?= [ "UninitValue" ]
-      fmap meKind (trFaults tr) @?= [ "InvalidRead" ]
+      fmap (meKind . snd) (trUnrelated tr) @?= [ "UninitValue" ]
+      fmap (meKind . snd) (trFaults tr) @?= [ "InvalidRead" ]
 
   , testCase "a frame is named by its address in its object" $ do
       os <- either assertFailure pure
@@ -109,16 +107,39 @@ traceTests = testGroup "trace"
       objectOffset os (f "/lib/libc.so.6" 0x7000) @?= Nothing
 
   , testCase "a site is kept to the objects named" $ do
-      tr <- trace <$> fixture "probe.xml"
+      tr <- one <$> fixture "probe.xml"
       length (trSites (sitesIn [ "probe" ] tr)) @?= 2
       trSites (sitesIn [ "libc" ] tr) @?= []
       length (trSites (sitesIn [] tr)) @?= 2
 
   , testCase "one site per instruction, whatever called it" $ do
-      tr <- trace <$> either assertFailure pure (readMemcheck twoCallers)
-      fmap (\s -> (frIp (siFrame s), siCount s, length (siStacks s)))
+      tr <- one <$> either assertFailure pure (readMemcheck twoCallers)
+      fmap (\s -> (frIp (at s), siCount s, length (siStacks s)))
           (trSites tr)
         @?= [ (0x10, 7, 2) ]
+
+  , testCase "runs' sites are one per instruction, with their runs" $ do
+      a <- either assertFailure pure (readMemcheck mixed)
+      b <- either assertFailure pure (readMemcheck twoCallers)
+      -- the same object loaded 0x100 higher in the second run: its
+      -- branch at 0x110 is the first run's at 0x10
+      let obj = "/lib.so"
+          inObj mc = mc { mcErrors =
+            [ e { meStack = [ f { frObj = Just obj }
+                            | f <- meStack e ] }
+            | e <- mcErrors mc ] }
+          moved mc = mc { mcErrors =
+            [ e { meStack = [ f { frIp = frIp f + 0x100 }
+                            | f <- meStack e ] }
+            | e <- mcErrors mc ] }
+          tr = trace
+            [ Taint "a" (inObj a) [ (0, obj) ] (Just 0)
+            , Taint "b" (moved (inObj b)) [ (0x100, obj) ] (Just 1) ]
+      fmap (\s -> (siClass s, lcOffset (siAt s), siCount s, siRuns s
+                  , length (siStacks s)))
+          (trSites tr)
+        @?= [ (Control, Just 0x10, 5 + 7, [ 0, 1 ], 1 + 2) ]
+      fmap fst (trUnrelated tr) @?= [ 0 ]
   ]
 
 diffTests :: TestTree
@@ -374,6 +395,14 @@ jsonTests = testGroup "json"
                      , ("a", String "q\"\n\1") ])
         @?= "{\n  \"b\": 1,\n  \"a\": \"q\\\"\\n\\u0001\"\n}\n"
   ]
+
+-- a trace of one run, of which memcheck's report is all that is
+-- known
+one :: Memcheck -> Trace
+one mc = trace [ Taint "run" mc [] Nothing ]
+
+at :: Site -> Frame
+at = lcFrame . siAt
 
 fixture :: FilePath -> IO Memcheck
 fixture f = do

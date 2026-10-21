@@ -26,10 +26,13 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
 import qualified Data.Text.IO as TIO
-import System.Directory (getTemporaryDirectory, removeFile)
+import System.Directory
+  (createDirectoryIfMissing, doesDirectoryExist, doesFileExist,
+   getTemporaryDirectory, removeFile)
 import System.Environment (getArgs, getEnvironment, lookupEnv)
 import System.Exit (ExitCode(..), exitWith)
-import System.FilePath (takeFileName)
+import System.FilePath (takeFileName, (</>))
+import Text.Read (readMaybe)
 import System.IO
   (IOMode(..), hClose, hPutStrLn, openTempFile, stderr, withBinaryFile)
 import System.Process (proc, waitForProcess, withCreateProcess)
@@ -42,14 +45,14 @@ import Vestigia.Diff
    readDump, restrictTo, runApart)
 import Vestigia.Json (encode)
 import Vestigia.Layout (fixLayout)
-import Vestigia.Memcheck (readMemcheck)
+import Vestigia.Memcheck (Memcheck, readMemcheck)
 import Vestigia.Symbol (symbolize)
 import Vestigia.Trace
-  (readObjects, sitesIn, trace, traceJson, traceSummary, withObjects)
+  (Taint(..), readObjects, sitesIn, trace, traceJson, traceSummary)
 
 data Opts = Opts {
     oValgrind :: !(Maybe FilePath)
-  , oXml :: !(Maybe FilePath)
+  , oDir :: !(Maybe FilePath)
   , oOut :: !(Maybe FilePath)
   , oQemu :: !(Maybe FilePath)
   , oPlugin :: !(Maybe FilePath)
@@ -69,8 +72,8 @@ main = do
       Right (_, []) -> usage "run: no program given"
       Left e -> usage e
     ("read" : rest) -> case options rest of
-      Right (o, [ xml ]) -> readXml o xml
-      Right _ -> usage "read: one XML file expected"
+      Right (o, runs@(_ : _)) -> readRuns o runs
+      Right _ -> usage "read: a run or memcheck XML file expected"
       Left e -> usage e
     ("record" : rest) -> case options rest of
       Right (o, prog : progArgs) -> record o prog progArgs
@@ -88,9 +91,9 @@ usage e = do
   hPutStrLn stderr ("vestigia: " <> e)
   hPutStrLn stderr $ unlines
     [ "usage:"
-    , "  vestigia run [--valgrind PATH] [--xml FILE] [--out FILE] \
+    , "  vestigia run [--valgrind PATH] [--dir DIR] [--out FILE] \
       \[--object TEXT]... -- PROGRAM [ARG...]"
-    , "  vestigia read [--out FILE] [--object TEXT]... FILE.xml"
+    , "  vestigia read [--out FILE] [--object TEXT]... RUN..."
     , "  vestigia record [--qemu PATH] [--plugin PATH] --dump FILE \
       \-- PROGRAM [ARG...]"
     , "  vestigia diff [--out FILE] [--addr2line PATH] \
@@ -98,8 +101,10 @@ usage e = do
       \DUMP DUMP..."
     , ""
     , "run executes PROGRAM under memcheck, which reports every"
-    , "branch and address that depended on bytes the program marked"
-    , "secret (vestigia.h), and writes the report (vestigia/trace-v1)."
+    , "branch, address, and division that depended on bytes the"
+    , "program marked secret (vestigia.h), and writes the report"
+    , "(vestigia/trace-v2); --dir keeps the run in DIR. read reports"
+    , "on runs kept so, or memcheck XML files made elsewhere, as one."
     , "valgrind is --valgrind, else $VESTIGIA_VALGRIND, else on PATH."
     , "--object keeps sites in objects whose path contains TEXT."
     , ""
@@ -126,7 +131,7 @@ options = go (Opts Nothing Nothing Nothing Nothing Nothing Nothing
     go o xs = case xs of
       ("--" : rest) -> Right (o, rest)
       ("--valgrind" : p : rest) -> go o { oValgrind = Just p } rest
-      ("--xml" : p : rest) -> go o { oXml = Just p } rest
+      ("--dir" : p : rest) -> go o { oDir = Just p } rest
       ("--out" : p : rest) -> go o { oOut = Just p } rest
       ("--qemu" : p : rest) -> go o { oQemu = Just p } rest
       ("--plugin" : p : rest) -> go o { oPlugin = Just p } rest
@@ -163,22 +168,30 @@ memcheckArgs xml =
   , "--child-silent-after-fork=yes"
   ]
 
+-- a run kept in a directory (run --dir): memcheck's XML, the objects
+-- the harness's first mark wrote (vestigia.h), and the harness's
+-- exit status
+runXml, runObjects, runExit :: FilePath -> FilePath
+runXml d = d </> "memcheck.xml"
+runObjects d = d </> "objects"
+runExit d = d </> "exit"
+
 run :: Opts -> FilePath -> [String] -> IO ()
 run o prog progArgs = do
   env <- lookupEnv "VESTIGIA_VALGRIND"
   let valgrind = maybe (maybe "valgrind" id env) id (oValgrind o)
-  (xml, temporary) <- case oXml o of
-    Just p -> pure (p, False)
+  (xml, objects) <- case oDir o of
+    Just d -> do
+      createDirectoryIfMissing True d
+      writeFile (runObjects d) ""
+      pure (runXml d, runObjects d)
     Nothing -> do
       tmp <- getTemporaryDirectory
       (p, h) <- openTempFile tmp "vestigia.xml"
       hClose h
-      pure (p, True)
-  -- where the harness's loader put its objects, which the
-  -- harness's first mark writes (vestigia.h)
-  tmp <- getTemporaryDirectory
-  (objects, oh) <- openTempFile tmp "vestigia-objects"
-  hClose oh
+      (q, oh) <- openTempFile tmp "vestigia-objects"
+      hClose oh
+      pure (p, q)
   environment <- getEnvironment
   r <- try (withCreateProcess
          (proc valgrind (memcheckArgs xml <> (prog : progArgs)))
@@ -192,45 +205,79 @@ run o prog progArgs = do
         <> show (e :: IOException))
       exitWith (ExitFailure 2)
     Right c -> pure c
-  otext <- TIO.readFile objects
-  os <- case readObjects otext of
-    Left e -> do
-      hPutStrLn stderr ("vestigia: " <> objects <> ": " <> e)
-      exitWith (ExitFailure 2)
-    Right v -> pure v
-  removeFile objects
-  -- no objects written, no secret marked: a run that found nothing
-  -- because nothing was secret is no evidence, and is refused
-  when (null os) $ do
-    hPutStrLn stderr "vestigia: the harness marked no secret \
-      \(vestigia_secret was never called on any bytes); its run \
-      \says nothing"
-    exitWith (ExitFailure 2)
-  report o (Just (exitStatus code)) os xml
-  if temporary then removeFile xml else pure ()
+  t <- case oDir o of
+    Just d -> do
+      writeFile (runExit d) (show (exitStatus code) <> "\n")
+      readRun d
+    Nothing -> do
+      os <- markedObjects objects
+      mc <- readXml xml
+      removeFile objects
+      removeFile xml
+      pure (Taint "run" mc os (Just (exitStatus code)))
+  report o [ t ]
 
 exitStatus :: ExitCode -> Int
 exitStatus c = case c of
   ExitSuccess -> 0
   ExitFailure n -> n
 
-readXml :: Opts -> FilePath -> IO ()
-readXml o xml = report o Nothing [] xml
+-- runs kept by run --dir, or memcheck XML files made elsewhere, of
+-- which nothing more is known
+readRuns :: Opts -> [FilePath] -> IO ()
+readRuns o paths = do
+  ts <- traverse (\p -> do
+      kept <- doesDirectoryExist p
+      if kept
+        then readRun p
+        else do
+          mc <- readXml p
+          pure (Taint (T.pack (takeFileName p)) mc [] Nothing))
+    paths
+  report o ts
 
-report :: Opts -> Maybe Int -> [(Integer, T.Text)] -> FilePath -> IO ()
-report o exit os xml = do
+readRun :: FilePath -> IO Taint
+readRun d = do
+  os <- markedObjects (runObjects d)
+  mc <- readXml (runXml d)
+  known <- doesFileExist (runExit d)
+  exit <- if known
+    then fmap (readMaybe . takeWhile (/= '\n')) (readFile (runExit d))
+    else pure Nothing
+  pure (Taint (T.pack (takeFileName d)) mc os exit)
+
+-- the objects a run's harness reported where it marked its secret;
+-- none written, no secret marked: a run that found nothing because
+-- nothing was secret is no evidence, and is refused
+markedObjects :: FilePath -> IO [(Integer, T.Text)]
+markedObjects p = do
+  t <- TIO.readFile p
+  case readObjects t of
+    Left e -> do
+      hPutStrLn stderr ("vestigia: " <> p <> ": " <> e)
+      exitWith (ExitFailure 2)
+    Right [] -> do
+      hPutStrLn stderr ("vestigia: " <> p <> ": the harness marked \
+        \no secret (vestigia_secret was never called on any bytes); \
+        \its run says nothing")
+      exitWith (ExitFailure 2)
+    Right os -> pure os
+
+readXml :: FilePath -> IO Memcheck
+readXml xml = do
   bytes <- BS.readFile xml
-  let txt = TE.decodeUtf8With TEE.lenientDecode bytes
-  case readMemcheck txt of
+  case readMemcheck (TE.decodeUtf8With TEE.lenientDecode bytes) of
     Left e -> do
       hPutStrLn stderr ("vestigia: " <> xml <> ": " <> e)
       exitWith (ExitFailure 2)
-    Right mc -> do
-      let tr = sitesIn (oObjects o) (withObjects os (trace mc))
-          doc = encode
-            (traceJson (T.pack (showVersion version)) exit tr)
-      maybe (TIO.putStr doc) (\p -> TIO.writeFile p doc) (oOut o)
-      TIO.hPutStr stderr (traceSummary tr)
+    Right mc -> pure mc
+
+report :: Opts -> [Taint] -> IO ()
+report o ts = do
+  let tr = sitesIn (oObjects o) (trace ts)
+      doc = encode (traceJson (T.pack (showVersion version)) tr)
+  maybe (TIO.putStr doc) (\p -> TIO.writeFile p doc) (oOut o)
+  TIO.hPutStr stderr (traceSummary tr)
 
 -- a tool named by its option, else its environment variable, else
 -- the given default

@@ -37,7 +37,7 @@ let
   trace = vestigia.traceOf {
     name = "probe";
     harness = "${probe}/bin/probe";
-    args = [ (builtins.head secrets) ];
+    runs = map (s: [ s ]) secrets;
     inherit objects;
   };
 
@@ -51,12 +51,13 @@ let
 
   # each report's (class, function) pairs in the harness, sorted
   expected = {
-    trace = [ [ "address" "lookup" ] [ "control" "branchy" ]
-              [ "control" "calls" ] [ "operand" "divide" ]
+    trace = [ [ "address" "lookup" ] [ "address" "rare" ]
+              [ "control" "branchy" ] [ "control" "calls" ]
+              [ "control" "rare" ] [ "operand" "divide" ]
               [ "operand" "divide_memory" ] ];
     diff = [ [ "address" "lookup" ] [ "control" "branchy" ]
-             [ "control" "calls" ] [ "operand" "divide" ]
-             [ "operand" "divide_memory" ] ];
+             [ "control" "calls" ] [ "control" "rare" ]
+             [ "operand" "divide" ] [ "operand" "divide_memory" ] ];
   };
 in
 pkgs.runCommand "vestigia-probe-check" {
@@ -75,6 +76,14 @@ pkgs.runCommand "vestigia-probe-check" {
   check ${diff}/diff.json \
     '[.origins[] | [.class, .frames[0].function]] | unique' \
     '${builtins.toJSON expected.diff}'
+
+  # every secret is traced under taint, and the table index on the
+  # third secret's path is that run's alone
+  check ${trace}/trace.json '[.runs[] | .exit]' '[0,0,0]'
+  check ${trace}/trace.json \
+    '[.sites[] | select(.function == "rare" and .class == "address")
+      | .runs]' \
+    '[["run-3"]]'
 
   # both instruments name each instruction they both saw by one
   # address: a division memcheck reports where it divides, not at the
