@@ -245,6 +245,20 @@ diffTests = testGroup "diff"
       -- in the same order, nothing
       dvOrigins (diffDumps [ a, a ]) @?= []
 
+  , testCase "a return goes where its call sent it: downstream" $ do
+      -- 0x50 returns four times in each run, to 0x30 twice in A and
+      -- three times in B, as the branch at 0x10 sent it
+      a <- either assertFailure pure (readDump (dumpA <> T.unlines
+        [ "I 50 4 0 aaaa 0 /lib.so 50", "R 50", "E 50 30 2"
+        , "E 50 60 2" ]))
+      b <- either assertFailure pure (readDump (dumpB <> T.unlines
+        [ "I 50 4 0 aaaa 0 /lib.so 50", "R 50", "E 50 30 3"
+        , "E 50 60 1" ]))
+      let dv = diffDumps [ a, b ]
+      fmap (\(o, i) -> (o, inPc i)) (dvOrigins dv)
+        @?= [ (ControlOrigin, 0x10), (AddressOrigin, 0x20) ]
+      fmap inPc (dvDownstream dv) @?= [ 0x30, 0x50 ]
+
   , testCase "identical runs have no origins" $ do
       a <- either assertFailure pure (readDump dumpA)
       let dv = diffDumps [ a, a ]

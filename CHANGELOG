@@ -15,10 +15,11 @@
       diverge (vestigia/diff-v3: each run with how it was made, each
       origin with the runs alike there and the runs that never
       reached it, a branch taking its outcomes in another order an
-      origin too, and what ran downstream listed per object), set
-      against controls repeating a secret, with what every run
-      executed in each object, and runs designed to reach particular
-      paths compared for control and coverage alone (`--designed`);
+      origin too, a return never one, and what ran downstream listed
+      per object), set against controls repeating a secret, with
+      what every run executed in each object, and runs designed to
+      reach particular paths compared for control and coverage alone
+      (`--designed`);
       runs are recorded, an x86_64 or aarch64 harness on either
       host, with randomisation off (or not at all) and the guest's
       entropy, its getrandom included, seeded, and QEMU's own

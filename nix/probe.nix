@@ -51,8 +51,10 @@ let
 
   # each report's (class, function) pairs in the harness, sorted
   expected = {
-    trace = [ [ "address" "lookup" ] [ "control" "branchy" ] ];
-    diff = [ [ "address" "lookup" ] [ "control" "branchy" ] ];
+    trace = [ [ "address" "lookup" ] [ "control" "branchy" ]
+              [ "control" "calls" ] ];
+    diff = [ [ "address" "lookup" ] [ "control" "branchy" ]
+             [ "control" "calls" ] ];
   };
 in
 pkgs.runCommand "vestigia-probe-check" {

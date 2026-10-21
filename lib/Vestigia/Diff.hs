@@ -23,7 +23,10 @@
 -- An instruction run equally often in every run whose addresses
 -- differ computed one from the secret: an `address` origin. Every
 -- other instruction run a different number of times sits where
--- control had already diverged: it is downstream.
+-- control had already diverged: it is downstream. So is a return
+-- whose transfers differ, however often it ran: it goes where the
+-- call before it sent it, so its outcomes differ only because
+-- control had diverged before the call.
 --
 -- Unlike memcheck's taint, this sees what control flow does to
 -- data as well as what data does: a value chosen by a secret
@@ -113,11 +116,12 @@ data Run = Run {
   } deriving (Eq, Show)
 
 -- | One run: its instructions by address, its transfers by source,
---   each a count per target, and how it was made, where its dump
---   says.
+--   each a count per target, the instructions that return, and how
+--   it was made, where its dump says.
 data Dump = Dump {
     dpInsns :: !(M.Map Integer Insn)
   , dpTransfers :: !(M.Map Integer (M.Map Integer Integer))
+  , dpReturns :: !(S.Set Integer)
   , dpRun :: !(Maybe Run)
   } deriving (Eq, Show)
 
@@ -130,12 +134,12 @@ data Dump = Dump {
 --   bytes, in hex; @X@, the exit status, in decimal) is read whole or
 --   not at all.
 readDump :: T.Text -> Either String Dump
-readDump t = go (T.lines t) M.empty M.empty [] Nothing Nothing
+readDump t = go (T.lines t) M.empty M.empty S.empty [] Nothing Nothing
   where
-    go ls is es as env st = case ls of
+    go ls is es rs as env st = case ls of
       []
         | any ((> 0) . inCount) (M.elems is) ->
-            Dump is es <$> record (reverse as) env st
+            Dump is es rs <$> record (reverse as) env st
         | otherwise ->
             Left "no instruction ran: the run was not recorded"
       (l : rest) -> case T.words l of
@@ -144,27 +148,30 @@ readDump t = go (T.lines t) M.empty M.empty [] Nothing Nothing
                     <*> pure ord
                     <*> pure (if obj == "-" then Nothing else Just obj)
                     <*> unhex off
-          go rest (M.insert (inPc i) i is) es as env st
+          go rest (M.insert (inPc i) i is) es rs as env st
         [ "E", from, to, n ] -> do
           f <- unhex from
           k <- unhex to
           c <- unhex n
           go rest is (M.insertWith M.union f (M.singleton k c) es)
-            as env st
+            rs as env st
+        [ "R", pc ] -> do
+          r <- unhex pc
+          go rest is es (S.insert r rs) as env st
         [ "T", _ ] ->
           Left "the guest started a second thread, which a trace \
                \cannot record: the run was stopped"
-        [ "A" ] -> go rest is es (BS.empty : as) env st
+        [ "A" ] -> go rest is es rs (BS.empty : as) env st
         [ "A", h ] -> do
           b <- unhexBytes h
-          go rest is es (b : as) env st
+          go rest is es rs (b : as) env st
         [ "N", n, b ] -> do
           v <- (,) <$> unhex n <*> unhex b
-          go rest is es as (Just v) st
+          go rest is es rs as (Just v) st
         [ "X", x ] -> case readMaybe (T.unpack x) of
-          Just v -> go rest is es as env (Just v)
+          Just v -> go rest is es rs as env (Just v)
           Nothing -> Left ("not an exit status: " <> T.unpack x)
-        [] -> go rest is es as env st
+        [] -> go rest is es rs as env st
         _ -> Left ("an unreadable dump line: " <> T.unpack l)
     record as env st = case (as, env, st) of
       ([], Nothing, Nothing) -> pure Nothing
@@ -373,9 +380,16 @@ diffDesigned cs ds xs = Divergence {
       (r : rest) -> not (all (outcomesAlike r) rest)
       [] -> False
 
-    controlPcs = S.filter divergent transferSources
+    -- a return goes where its call sent it: downstream, never an
+    -- origin, whatever its outcomes
+    returns = S.unions (fmap dpReturns runs)
+    divergentPcs = S.filter divergent transferSources
+    controlPcs = divergentPcs `S.difference` returns
     addressPcs = S.fromList [ inPc i | (_, i) <- addresses ]
-    downstream = ((pcs `S.difference` steady) `S.difference` controlPcs)
+    downstream =
+      (((pcs `S.difference` steady)
+         `S.union` (divergentPcs `S.intersection` returns))
+         `S.difference` controlPcs)
       `S.difference` addressPcs
 
     controls =

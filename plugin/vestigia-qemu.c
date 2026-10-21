@@ -16,12 +16,15 @@
  * transfers as often in another order, and an instruction run as
  * often but touching other addresses computed one from the secret.
  * Nothing needs aligning, and no taint is propagated, so effects of
- * control flow are seen as well as those of data flow.
+ * control flow are seen as well as those of data flow. It marks the
+ * instructions that return (x86_64's and aarch64's), which go where
+ * the call before them sent them.
  *
  * At exit it writes, to the file named by its `out` argument:
  *
  *   I <pc> <count> <accesses> <fingerprint> <order> <object> <address>
  *   E <from> <to> <count>
+ *   R <pc>
  *
  * or, for a guest that started a second thread, the line `T 2` alone.
  *
@@ -48,10 +51,14 @@
 
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
+/* what an instruction is to a comparison, read from its bytes */
+enum { PLAIN, RETURN };
+
 typedef struct Insn {
   uint64_t pc;
   uint64_t size;
   uintptr_t haddr;
+  int kind;
   uint64_t count;
   uint64_t accesses;
   uint64_t fingerprint;
@@ -63,17 +70,51 @@ static GHashTable *insns; /* pc -> Insn */
 static Insn *prev;        /* the instruction executed last */
 static char *out_path;
 static gint vcpus;        /* the guest's threads, a vCPU each */
+static gboolean aarch64;  /* the guest's ISA: aarch64, else x86_64 */
 
 static const uint64_t fnv_offset = 0xcbf29ce484222325ULL;
 static const uint64_t fnv_prime = 0x100000001b3ULL;
 
-static Insn *insn_at(uint64_t pc, uint64_t size, uintptr_t haddr) {
+/* an x86_64 instruction's opcode: past its legacy and REX prefixes */
+static size_t x86_opcode(const uint8_t *b, size_t n) {
+  size_t k = 0;
+  while (k < n && (b[k] == 0x66 || b[k] == 0x67 || b[k] == 0xf0
+                   || b[k] == 0xf2 || b[k] == 0xf3 || b[k] == 0x2e
+                   || b[k] == 0x36 || b[k] == 0x3e || b[k] == 0x26
+                   || b[k] == 0x64 || b[k] == 0x65))
+    k++;
+  if (k < n && (b[k] & 0xf0) == 0x40) k++;
+  return k;
+}
+
+static int kind_of(const uint8_t *b, size_t n) {
+  if (aarch64) {
+    uint32_t w;
+    if (n < 4) return PLAIN;
+    w = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16
+        | (uint32_t)b[3] << 24;
+    /* RET Xn, RETAA, RETAB */
+    if ((w & 0xfffffc1f) == 0xd65f0000 || w == 0xd65f0bff
+        || w == 0xd65f0fff)
+      return RETURN;
+    return PLAIN;
+  } else {
+    size_t k = x86_opcode(b, n);
+    /* RET, RET imm16 */
+    if (k < n && (b[k] == 0xc3 || b[k] == 0xc2)) return RETURN;
+    return PLAIN;
+  }
+}
+
+static Insn *insn_at(uint64_t pc, uint64_t size, uintptr_t haddr,
+                     int kind) {
   Insn *i = g_hash_table_lookup(insns, &pc);
   if (i == NULL) {
     i = g_new0(Insn, 1);
     i->pc = pc;
     i->size = size;
     i->haddr = haddr;
+    i->kind = kind;
     i->fingerprint = fnv_offset;
     i->order = fnv_offset;
     i->succ = g_hash_table_new_full(g_int64_hash, g_int64_equal,
@@ -134,9 +175,12 @@ static void on_translate(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
   (void)id;
   for (size_t k = 0; k < n; k++) {
     struct qemu_plugin_insn *qi = qemu_plugin_tb_get_insn(tb, k);
+    uint8_t bytes[16];
+    size_t len = qemu_plugin_insn_data(qi, bytes, sizeof bytes);
     Insn *i = insn_at(qemu_plugin_insn_vaddr(qi),
                       qemu_plugin_insn_size(qi),
-                      (uintptr_t)qemu_plugin_insn_haddr(qi));
+                      (uintptr_t)qemu_plugin_insn_haddr(qi),
+                      kind_of(bytes, len));
     qemu_plugin_register_vcpu_insn_exec_cb(qi, on_exec,
                                            QEMU_PLUGIN_CB_NO_REGS, i);
     qemu_plugin_register_vcpu_mem_cb(qi, on_mem, QEMU_PLUGIN_CB_NO_REGS,
@@ -276,6 +320,7 @@ static void at_exit(qemu_plugin_id_t id, void *p) {
       fprintf(out, "I %" PRIx64 " %" PRIx64 " %" PRIx64 " %016" PRIx64
               " %016" PRIx64 " - 0\n", i->pc, i->count, i->accesses,
               i->fingerprint, i->order);
+    if (i->kind == RETURN) fprintf(out, "R %" PRIx64 "\n", i->pc);
     GHashTableIter jt;
     gpointer tk, tn;
     g_hash_table_iter_init(&jt, i->succ);
@@ -289,7 +334,7 @@ static void at_exit(qemu_plugin_id_t id, void *p) {
 QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
                                            const qemu_info_t *info,
                                            int argc, char **argv) {
-  (void)info;
+  aarch64 = strcmp(info->target_name, "aarch64") == 0;
   for (int k = 0; k < argc; k++)
     if (strncmp(argv[k], "out=", 4) == 0)
       out_path = g_strdup(argv[k] + 4);

@@ -77,8 +77,9 @@ address  0x152c8  Fq::sqrt_ratio_zeta                 invsqrt.rs:113  ...
 An *origin* is a branch whose outcomes differ between runs, in
 proportion or in order, or an instruction whose addresses differ.
 Each names the runs that behaved alike there. Instructions that
-merely ran a different number of times are listed as downstream, and
-every instruction some run executed is listed as coverage.
+merely ran a different number of times are listed as downstream, as
+are returns whose targets differ, which go where their calls sent
+them; and every instruction some run executed is listed as coverage.
 
 * `--control DUMP` repeats the first run's secret; whatever differs
   between the two is *unsteady* and kept out of the origins.
