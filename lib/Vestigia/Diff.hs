@@ -58,8 +58,12 @@
 
 module Vestigia.Diff (
     Insn(..)
+  , Run(..)
   , Dump(..)
   , readDump
+  , runApart
+  , Kind(..)
+  , Named(..)
   , Origin(..)
   , Divergence(..)
   , diffDumps
@@ -72,11 +76,15 @@ module Vestigia.Diff (
   , divergenceSummary
   ) where
 
+import qualified Data.ByteString as BS
 import qualified Data.List as L
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import qualified Data.Text.Encoding.Error as TEE
 import Numeric (readHex, showHex)
+import Text.Read (readMaybe)
 
 import Vestigia.Json
 import Vestigia.Symbol (Place(..))
@@ -94,24 +102,40 @@ data Insn = Insn {
   , inOffset :: !Integer
   } deriving (Eq, Show)
 
--- | One run: its instructions by address, and its transfers by
---   source, each a count per target.
+-- | How a run was made, as `vestigia record` appends it to the
+--   plugin's dump: the program and its arguments, as the bytes it
+--   passed them; the variables of the environment the guest was
+--   given, and the bytes they take; and the run's exit status.
+data Run = Run {
+    rnArguments :: ![BS.ByteString]
+  , rnEnvironment :: !(Integer, Integer)
+  , rnStatus :: !Integer
+  } deriving (Eq, Show)
+
+-- | One run: its instructions by address, its transfers by source,
+--   each a count per target, and how it was made, where its dump
+--   says.
 data Dump = Dump {
     dpInsns :: !(M.Map Integer Insn)
   , dpTransfers :: !(M.Map Integer (M.Map Integer Integer))
+  , dpRun :: !(Maybe Run)
   } deriving (Eq, Show)
 
 -- | Read a plugin dump. A dump in which no instruction ran records
 --   no run (the plugin writes every instruction the guest executed),
 --   and is refused rather than compared as one that did nothing, as
 --   is the dump of a guest the plugin stopped for starting a second
---   thread.
+--   thread. The record `vestigia record` appends (an @A@ line per
+--   argument, its bytes in hex; @N@, the environment's variables and
+--   bytes, in hex; @X@, the exit status, in decimal) is read whole or
+--   not at all.
 readDump :: T.Text -> Either String Dump
-readDump t = go (T.lines t) M.empty M.empty
+readDump t = go (T.lines t) M.empty M.empty [] Nothing Nothing
   where
-    go ls is es = case ls of
+    go ls is es as env st = case ls of
       []
-        | any ((> 0) . inCount) (M.elems is) -> pure (Dump is es)
+        | any ((> 0) . inCount) (M.elems is) ->
+            Dump is es <$> record (reverse as) env st
         | otherwise ->
             Left "no instruction ran: the run was not recorded"
       (l : rest) -> case T.words l of
@@ -120,20 +144,73 @@ readDump t = go (T.lines t) M.empty M.empty
                     <*> pure ord
                     <*> pure (if obj == "-" then Nothing else Just obj)
                     <*> unhex off
-          go rest (M.insert (inPc i) i is) es
+          go rest (M.insert (inPc i) i is) es as env st
         [ "E", from, to, n ] -> do
           f <- unhex from
           k <- unhex to
           c <- unhex n
           go rest is (M.insertWith M.union f (M.singleton k c) es)
+            as env st
         [ "T", _ ] ->
           Left "the guest started a second thread, which a trace \
                \cannot record: the run was stopped"
-        [] -> go rest is es
+        [ "A" ] -> go rest is es (BS.empty : as) env st
+        [ "A", h ] -> do
+          b <- unhexBytes h
+          go rest is es (b : as) env st
+        [ "N", n, b ] -> do
+          v <- (,) <$> unhex n <*> unhex b
+          go rest is es as (Just v) st
+        [ "X", x ] -> case readMaybe (T.unpack x) of
+          Just v -> go rest is es as env (Just v)
+          Nothing -> Left ("not an exit status: " <> T.unpack x)
+        [] -> go rest is es as env st
         _ -> Left ("an unreadable dump line: " <> T.unpack l)
+    record as env st = case (as, env, st) of
+      ([], Nothing, Nothing) -> pure Nothing
+      (_ : _, Just e, Just x) -> pure (Just (Run as e x))
+      _ -> Left "an incomplete record of the run"
     unhex x = case readHex (T.unpack x) of
       [ (v, "") ] -> pure v
       _ -> Left ("not hexadecimal: " <> T.unpack x)
+    unhexBytes h
+      | odd (T.length h) = Left ("not hexadecimal bytes: " <> T.unpack h)
+      | otherwise =
+          BS.pack <$> traverse (fmap fromInteger . unhex) (T.chunksOf 2 h)
+
+-- | Why a run cannot be set beside the first as differing from it in
+--   the secret alone, if it cannot: it ran another program, its
+--   arguments differ from the first run's in number or length, or it
+--   was given an environment of another size. Each lays the guest's
+--   stack out apart, and so every address on it.
+runApart :: Run -> Run -> Maybe String
+runApart first r
+  | take 1 (rnArguments r) /= take 1 (rnArguments first) =
+      Just "ran another program than the first run"
+  | fmap BS.length (rnArguments r)
+      /= fmap BS.length (rnArguments first) =
+      Just "has arguments that differ from the first run's in number \
+           \or length"
+  | rnEnvironment r /= rnEnvironment first =
+      Just "was given an environment of another size than the first \
+           \run's"
+  | otherwise = Nothing
+
+-- | What a run is to a comparison: declared, designed for a path, or
+--   a control repeating the first run's secret.
+data Kind =
+    DeclaredRun
+  | DesignedRun
+  | ControlRun
+  deriving (Eq, Show)
+
+-- | A run as the report names it: by its dump's file name, with what
+--   it is to the comparison and how it was made.
+data Named = Named {
+    nmName :: !T.Text
+  , nmKind :: !Kind
+  , nmRun :: !Run
+  } deriving (Eq, Show)
 
 -- | Where a run loaded each object it executed: any of its
 --   instructions' run-time addresses less its address in the object.
@@ -336,18 +413,26 @@ originText o = case o of
   ControlOrigin -> "control"
   AddressOrigin -> "address"
 
--- | The report: @vestigia/diff-v2@. Runs are named as given, the
---   declared then the designed.
+-- | The report: @vestigia/diff-v3@. Runs are given the declared,
+--   then the designed, then the controls, and an origin names the
+--   runs alike at it by the first two.
 divergenceJson
-  :: T.Text -> [T.Text] -> M.Map (T.Text, Integer) [Place] -> Divergence
+  :: T.Text -> [Named] -> M.Map (T.Text, Integer) [Place] -> Divergence
   -> Value
-divergenceJson version names places dv = Object
-  [ ("schema", String "vestigia/diff-v2")
+divergenceJson version runs places dv = Object
+  [ ("schema", String "vestigia/diff-v3")
   , ("tool", Object [ ("name", String "vestigia")
                     , ("version", String version) ])
-  , ("runs", Number (toInteger (dvRuns dv)))
-  , ("controls", Number (toInteger (dvControls dv)))
-  , ("designed", Number (toInteger (dvDesigned dv)))
+  , ("runs", Array
+      [ Object
+          [ ("name", String (nmName r))
+          , ("kind", String (kindText (nmKind r)))
+          , ("arguments", Array
+              [ String (TE.decodeUtf8With TEE.lenientDecode a)
+              | a <- rnArguments (nmRun r) ])
+          , ("status", Number (rnStatus (nmRun r)))
+          ]
+      | r <- runs ])
   , ("summary", Object
       [ ("control", count ControlOrigin)
       , ("address", count AddressOrigin)
@@ -379,6 +464,11 @@ divergenceJson version names places dv = Object
       | (o, xs) <- M.toList (dvExecuted dv) ])
   ]
   where
+    names = [ nmName r | r <- runs, nmKind r /= ControlRun ]
+    kindText k = case k of
+      DeclaredRun -> "declared"
+      DesignedRun -> "designed"
+      ControlRun -> "control"
     count o = Number (toInteger (length
       [ () | (o', _) <- dvOrigins dv, o' == o ]))
     named k = case drop k names of

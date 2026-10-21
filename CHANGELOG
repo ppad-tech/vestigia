@@ -12,19 +12,24 @@
     * `vestigia record` and `vestigia diff`: the harness under QEMU
       with vestigia's plugin, its leakage trace summarised per
       instruction, and where runs differing only in the secret
-      diverge (vestigia/diff-v2: each origin with the runs alike
-      there and the runs that never reached it, a branch taking its
-      outcomes in another order an origin too, and what ran
-      downstream listed per object), set against controls repeating a
-      secret, with what every run executed in each object, and runs
-      designed to reach particular paths compared for control and
-      coverage alone (`--designed`); runs are recorded with
+      diverge (vestigia/diff-v3: each run with how it was made, each
+      origin with the runs alike there and the runs that never
+      reached it, a branch taking its outcomes in another order an
+      origin too, and what ran downstream listed per object), set
+      against controls repeating a secret, with what every run
+      executed in each object, and runs designed to reach particular
+      paths compared for control and coverage alone (`--designed`);
+      runs are recorded with
       randomisation off (or not at all) and the guest's entropy,
       its getrandom included, seeded, and QEMU's own allocations kept
       off the guest's mappings, which under load can otherwise take
       the room of a guest library or heap; `diff` refuses runs that
-      loaded an object at different addresses. A taint run that
-      marked no secret is refused.
+      loaded an object at different addresses, runs of another
+      program or with arguments or an environment of another size
+      than the first run's, and a control that does not repeat the
+      first run's arguments; a guest that starts a second thread is
+      stopped and its dump refused. A taint run that marked no
+      secret is refused.
   * `traceOf` and `diffOf` run either as a derivation;
     `nix/lib.nix` holds them for any package set, with the version
     the command reports.

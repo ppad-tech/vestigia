@@ -96,6 +96,14 @@ arena, large blocks from the heap), and `diff` refuses runs that
 loaded an object at different addresses. A guest reading
 `/dev/urandom` still reads the host's.
 
+`record` appends to its dump how the run was made: the program and
+its arguments, the size of the guest's environment, and the exit
+status, which the report gives for each run. `diff` refuses a run of
+another program, or with arguments of another number or length, or an
+environment of another size, than the first run's, each of which lays
+the guest's stack out apart; and a control that does not repeat the
+first run's arguments.
+
 ### As derivations
 
 The flake's `lib.<system>` holds `traceOf` and `diffOf`, which run
@@ -114,7 +122,7 @@ vestigia.lib.x86_64-linux.diffOf {
 ```
 
 The output holds `trace.json` (`vestigia/trace-v1`) or `diff.json`
-(`vestigia/diff-v2`), the raw memcheck XML or plugin dumps, what the
+(`vestigia/diff-v3`), the raw memcheck XML or plugin dumps, what the
 harness printed, and the wall time.
 
 ## Two instruments
@@ -139,7 +147,8 @@ ppad-poly1305, and ppad-secp256k1.
   memcheck needs a native host.
 * The plugin records one guest thread: a guest that starts a second
   is stopped, and its dump refused. Runs compared by `diff` must
-  differ only in the secret, argument lengths included.
+  differ only in the secret; it checks their arguments and
+  environments, not what the harness reads beyond them.
 * A GHC harness wants `-with-rtsopts=-xr1G -V0`, against the
   runtime's terabyte reservation and its interval timer.
 * Source lines need line tables.

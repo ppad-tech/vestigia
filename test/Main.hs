@@ -273,6 +273,31 @@ diffTests = testGroup "diff"
 
   , testCase "a guest stopped for a second thread is refused" $
       isLeft (readDump "T 2\n") @? "accepted"
+
+  , testCase "a run's record reads whole" $ do
+      d <- either assertFailure pure (readDump (dumpA <> T.unlines
+        [ "A 2f62696e2f70", "A", "A 3035", "N 2 1a", "X -9" ]))
+      dpRun d @?= Just (Run [ "/bin/p", "", "05" ] (2, 0x1a) (-9))
+      fmap dpRun (readDump dumpA) @?= Right Nothing
+
+  , testCase "an incomplete record is refused" $ do
+      isLeft (readDump (dumpA <> "A 3035\nN 2 1a\n")) @? "no status"
+      isLeft (readDump (dumpA <> "N 2 1a\nX 0\n")) @? "no arguments"
+      isLeft (readDump (dumpA <> "A 305\nN 2 1a\nX 0\n"))
+        @? "half a byte"
+
+  , testCase "runs made apart are told apart" $ do
+      let r = Run [ "/bin/p", "05" ] (2, 0x1a) 0
+      runApart r r { rnArguments = [ "/bin/p", "3a" ], rnStatus = 1 }
+        @?= Nothing
+      isJust (runApart r r { rnArguments = [ "/bin/q", "05" ] })
+        @? "another program"
+      isJust (runApart r r { rnArguments = [ "/bin/p", "005" ] })
+        @? "a longer argument"
+      isJust (runApart r r { rnArguments = [ "/bin/p", "05", "x" ] })
+        @? "another argument"
+      isJust (runApart r r { rnEnvironment = (2, 0x1b) })
+        @? "a larger environment"
   ]
   where
     -- 0x10 is a branch run four times, taken twice in A and three
@@ -326,6 +351,11 @@ isLeft :: Either a b -> Bool
 isLeft e = case e of
   Left _ -> True
   Right _ -> False
+
+isJust :: Maybe a -> Bool
+isJust m = case m of
+  Just _ -> True
+  Nothing -> False
 
 -- a secret branch, an uninitialised heap read, a bad read, and a
 -- leak report

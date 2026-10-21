@@ -64,9 +64,32 @@ pkgs.runCommand "vestigia-probe-check" {
     '[.origins[] | [.class, .frames[0].function]] | unique' \
     '${builtins.toJSON expected.diff}'
 
+  # each run as it was made: the declared, then the control
+  check ${diff}/diff.json \
+    '[.runs[] | [.kind, .arguments[1], .status]]' \
+    '${builtins.toJSON (map (s: [ "declared" s 0 ]) secrets
+                       ++ [ [ "control" (builtins.head secrets) 0 ] ])}'
+
+  v=${vestigia.vestigia}/bin/vestigia
+
+  # a control must repeat the run it controls, and every run must lay
+  # out as the first: its arguments of one number and length
+  $v record --dump a -- ${probe}/bin/probe 00000005
+  $v record --dump b -- ${probe}/bin/probe 0000003a
+  $v record --dump c -- ${probe}/bin/probe 000000003a
+  if $v diff --control b a a 2> refusal; then
+    echo "probe: a control repeating another secret was taken" >&2
+    exit 1
+  fi
+  grep -q 'does not repeat' refusal
+  if $v diff a c 2> refusal; then
+    echo "probe: a run with a longer argument was compared" >&2
+    exit 1
+  fi
+  grep -q 'number or length' refusal
+
   # a guest that starts a second thread is stopped, and its dump
   # refused
-  v=${vestigia.vestigia}/bin/vestigia
   if $v record --dump threads -- ${threads}/bin/threads; then
     echo "probe: a guest's second thread was recorded" >&2
     exit 1

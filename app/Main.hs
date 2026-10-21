@@ -16,7 +16,10 @@ module Main (
 import Control.Exception (IOException, try)
 import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
+import Data.Foldable (for_)
 import Data.Version (showVersion)
+import qualified GHC.Foreign as GF
+import GHC.IO.Encoding (getFileSystemEncoding)
 import Numeric (showHex)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -32,8 +35,9 @@ import qualified System.Process as P
 
 import Paths_vestigia (version)
 import Vestigia.Diff
-  (diffDesigned, divergenceJson, divergenceSummary, dvOrigins,
-   inObject, inOffset, layoutApart, readDump, restrictTo)
+  (Dump(..), Kind(..), Named(..), Run(..), diffDesigned, divergenceJson,
+   divergenceSummary, dvOrigins, inObject, inOffset, layoutApart,
+   readDump, restrictTo, runApart)
 import Vestigia.Json (encode)
 import Vestigia.Layout (fixLayout)
 import Vestigia.Memcheck (readMemcheck)
@@ -98,9 +102,10 @@ usage e = do
     , "--object keeps sites in objects whose path contains TEXT."
     , ""
     , "record executes PROGRAM under QEMU with vestigia's plugin and"
-    , "dumps its leakage trace per instruction; diff compares dumps"
-    , "of runs that differ only in a secret and reports where they"
-    , "diverge (vestigia/diff-v1), naming sources with addr2line."
+    , "dumps its leakage trace per instruction, with how it was run;"
+    , "diff compares dumps of runs that differ only in a secret and"
+    , "reports where they diverge (vestigia/diff-v3), naming sources"
+    , "with addr2line."
     , "--object keeps origins in objects whose path contains TEXT;"
     , "--control names a run repeating the first run's secret, and"
     , "what differs in it is unsteady, not an origin."
@@ -192,12 +197,13 @@ run o prog progArgs = do
       \(vestigia_secret was never called on any bytes); its run \
       \says nothing"
     exitWith (ExitFailure 2)
-  report o (Just (exitCode code)) os xml
+  report o (Just (exitStatus code)) os xml
   if temporary then removeFile xml else pure ()
-  where
-    exitCode c = case c of
-      ExitSuccess -> 0
-      ExitFailure n -> n
+
+exitStatus :: ExitCode -> Int
+exitStatus c = case c of
+  ExitSuccess -> 0
+  ExitFailure n -> n
 
 readXml :: Opts -> FilePath -> IO ()
 readXml o xml = report o Nothing [] xml
@@ -249,22 +255,50 @@ record o prog progArgs = do
   let tunables = "GLIBC_TUNABLES"
       host = "glibc.malloc.arena_max=1:glibc.malloc.mmap_threshold="
         <> "33554432"
+      own = lookup tunables environment
       guest = maybe [ "-U", tunables ]
-        (\v -> [ "-E", tunables <> "=" <> v ]) (lookup tunables environment)
+        (\v -> [ "-E", tunables <> "=" <> v ]) own
+      others = filter ((/= tunables) . fst) environment
   r <- try (withCreateProcess
          ((proc qemu (guest
                      <> [ "-seed", "0"
                         , "-plugin", plugin <> ",out=" <> dump, prog ]
                      <> progArgs))
-            { P.env = Just ((tunables, host)
-                : filter ((/= tunables) . fst) environment) })
+            { P.env = Just ((tunables, host) : others) })
          (\_ _ _ ph -> waitForProcess ph))
   case r of
     Left e -> do
       hPutStrLn stderr ("vestigia: cannot run " <> qemu <> ": "
         <> show (e :: IOException))
       exitWith (ExitFailure 2)
-    Right c -> exitWith c
+    Right c -> do
+      -- how the run was made, by which diff tells runs that differ
+      -- in the secret alone from runs laid out apart: the guest's
+      -- environment is QEMU's, with its own tunables restored
+      appendRun dump (prog : progArgs)
+        (others <> [ (tunables, v) | Just v <- [ own ] ]) c
+      exitWith c
+
+-- append a run's record to its dump (Vestigia.Diff.readDump): its
+-- arguments' bytes, its environment's variables and the bytes they
+-- take, and its exit status
+appendRun :: FilePath -> [String] -> [(String, String)] -> ExitCode
+          -> IO ()
+appendRun dump args env code = do
+  enc <- getFileSystemEncoding
+  let bytes s = GF.withCStringLen enc s BS.packCStringLen
+  as <- traverse bytes args
+  es <- traverse (\(k, v) -> bytes (k <> "=" <> v)) env
+  appendFile dump $ unlines $
+    [ unwords ("A" : [ concatMap byte (BS.unpack a) | not (BS.null a) ])
+    | a <- as ]
+    <> [ "N " <> showHex (length es) "" <> " "
+           <> showHex (sum (fmap ((+ 1) . BS.length) es)) ""
+       , "X " <> show (exitStatus code) ]
+  where
+    byte w = case showHex w "" of
+      [ d ] -> [ '0', d ]
+      ds -> ds
 
 diff :: Opts -> [FilePath] -> IO ()
 diff o paths = do
@@ -272,6 +306,28 @@ diff o paths = do
   dumps <- traverse readOne paths
   controls <- traverse readOne (oControls o)
   designed <- traverse readOne (oDesigned o)
+  -- every run with how it was made: the declared, the designed, then
+  -- the controls. Runs made apart differ by more than the secret,
+  -- and are refused, not compared
+  named <- traverse (\(p, k, d) -> case dpRun d of
+      Just r -> pure (p, Named (T.pack (takeFileName p)) k r)
+      Nothing -> refuse (p <> " holds no record of how it was run \
+        \(vestigia record appends one), so nothing says what it ran"))
+    (zip3 (paths <> oDesigned o <> oControls o)
+          (fmap (const DeclaredRun) paths
+             <> fmap (const DesignedRun) (oDesigned o)
+             <> fmap (const ControlRun) (oControls o))
+          (dumps <> designed <> controls))
+  case named of
+    ((p0, first) : rest) -> for_ rest $ \(p, n) -> do
+      for_ (runApart (nmRun first) (nmRun n)) $ \why ->
+        refuse (p <> " " <> why <> " (" <> p0 <> "); runs compared \
+          \must differ in the secret alone")
+      when (nmKind n == ControlRun
+              && rnArguments (nmRun n) /= rnArguments (nmRun first)) $
+        refuse (p <> " is a control, but does not repeat the \
+          \arguments of " <> p0 <> ", the run it controls")
+    [] -> pure ()
   -- runs laid out apart differ wherever they touch memory, not by
   -- the secret: such runs are refused, not compared
   case zip paths dumps of
@@ -294,17 +350,16 @@ diff o paths = do
   places <- symbolize addr2line
     [ (obj, inOffset i) | (_, i) <- dvOrigins dv
                         , Just obj <- [ inObject i ] ]
-  -- a run is named by its dump's file name, the declared first
-  let names = fmap (T.pack . takeFileName) (paths <> oDesigned o)
-      doc = encode
-        (divergenceJson (T.pack (showVersion version)) names places dv)
+  let doc = encode (divergenceJson (T.pack (showVersion version))
+        (fmap snd named) places dv)
   maybe (TIO.putStr doc) (\p -> TIO.writeFile p doc) (oOut o)
   TIO.hPutStr stderr (divergenceSummary places dv)
   where
     readOne p = do
       bytes <- BS.readFile p
       case readDump (TE.decodeUtf8With TEE.lenientDecode bytes) of
-        Left e -> do
-          hPutStrLn stderr ("vestigia: " <> p <> ": " <> e)
-          exitWith (ExitFailure 2)
+        Left e -> refuse (p <> ": " <> e)
         Right d -> pure d
+    refuse e = do
+      hPutStrLn stderr ("vestigia: " <> e)
+      exitWith (ExitFailure 2)
