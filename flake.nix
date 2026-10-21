@@ -35,7 +35,13 @@
             inherit (v) traceOf diffOf valgrindDev version;
           };
 
-          checks.default = hpkgs.vestigia;
+          checks = {
+            default = hpkgs.vestigia;
+          }
+          # both instruments run Linux programs
+          // lib.optionalAttrs linux {
+            probe = import ./nix/probe.nix { inherit pkgs; vestigia = v; };
+          };
 
           devShells.default = hpkgs.shellFor {
             packages = p: [ p.vestigia ];
