@@ -270,6 +270,9 @@ diffTests = testGroup "diff"
 
   , testCase "an unreadable line is refused" $
       isLeft (readDump "I 10 zz 0 f 0 /lib.so 0\n") @? "accepted"
+
+  , testCase "a guest stopped for a second thread is refused" $
+      isLeft (readDump "T 2\n") @? "accepted"
   ]
   where
     -- 0x10 is a branch run four times, taken twice in A and three

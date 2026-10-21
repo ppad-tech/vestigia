@@ -137,8 +137,9 @@ ppad-poly1305, and ppad-secp256k1.
 * valgrind and QEMU's user mode run on Linux; elsewhere vestigia only
   reads their reports. QEMU traces other ISAs differentially, but
   memcheck needs a native host.
-* The plugin assumes a single-threaded guest, and runs compared by
-  `diff` must differ only in the secret, argument lengths included.
+* The plugin records one guest thread: a guest that starts a second
+  is stopped, and its dump refused. Runs compared by `diff` must
+  differ only in the secret, argument lengths included.
 * A GHC harness wants `-with-rtsopts=-xr1G -V0`, against the
   runtime's terabyte reservation and its interval timer.
 * Source lines need line tables.

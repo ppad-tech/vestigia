@@ -103,7 +103,9 @@ data Dump = Dump {
 
 -- | Read a plugin dump. A dump in which no instruction ran records
 --   no run (the plugin writes every instruction the guest executed),
---   and is refused rather than compared as one that did nothing.
+--   and is refused rather than compared as one that did nothing, as
+--   is the dump of a guest the plugin stopped for starting a second
+--   thread.
 readDump :: T.Text -> Either String Dump
 readDump t = go (T.lines t) M.empty M.empty
   where
@@ -124,6 +126,9 @@ readDump t = go (T.lines t) M.empty M.empty
           k <- unhex to
           c <- unhex n
           go rest is (M.insertWith M.union f (M.singleton k c) es)
+        [ "T", _ ] ->
+          Left "the guest started a second thread, which a trace \
+               \cannot record: the run was stopped"
         [] -> go rest is es
         _ -> Left ("an unreadable dump line: " <> T.unpack l)
     unhex x = case readHex (T.unpack x) of

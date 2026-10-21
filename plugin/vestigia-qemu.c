@@ -23,6 +23,8 @@
  *   I <pc> <count> <accesses> <fingerprint> <order> <object> <address>
  *   E <from> <to> <count>
  *
+ * or, for a guest that started a second thread, the line `T 2` alone.
+ *
  * in hex, where <object> is the file the instruction's bytes were
  * mapped from ("-" if none, or if the file's program headers cannot
  * be read) and <address> its address in that file: where the file's
@@ -30,7 +32,9 @@
  * it. In a shared library that is often the instruction's offset in
  * the file; in an executable linked at a fixed address it is not.
  *
- * A single-threaded guest is assumed: the state below is unlocked.
+ * The state below is unlocked, so one guest thread is recorded: a
+ * guest that starts a second one is stopped there, its dump saying
+ * so, rather than recorded by threads racing on it.
  */
 #include <elf.h>
 #include <glib.h>
@@ -38,6 +42,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <qemu-plugin.h>
 
@@ -57,6 +62,7 @@ typedef struct Insn {
 static GHashTable *insns; /* pc -> Insn */
 static Insn *prev;        /* the instruction executed last */
 static char *out_path;
+static gint vcpus;        /* the guest's threads, a vCPU each */
 
 static const uint64_t fnv_offset = 0xcbf29ce484222325ULL;
 static const uint64_t fnv_prime = 0x100000001b3ULL;
@@ -106,6 +112,21 @@ static void on_mem(unsigned int vcpu, qemu_plugin_meminfo_t info,
   (void)info;
   i->fingerprint = (i->fingerprint ^ vaddr) * fnv_prime;
   i->accesses++;
+}
+
+static void on_vcpu_init(qemu_plugin_id_t id, unsigned int vcpu) {
+  (void)id;
+  (void)vcpu;
+  if (g_atomic_int_add(&vcpus, 1) > 0) {
+    FILE *out = fopen(out_path, "w");
+    if (out != NULL) {
+      fprintf(out, "T 2\n");
+      fclose(out);
+    }
+    fprintf(stderr, "vestigia-qemu: the guest started a second thread, "
+            "which a trace cannot record; the run is stopped\n");
+    _exit(EXIT_FAILURE);
+  }
 }
 
 static void on_translate(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
@@ -277,6 +298,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
     return -1;
   }
   insns = g_hash_table_new(g_int64_hash, g_int64_equal);
+  qemu_plugin_register_vcpu_init_cb(id, on_vcpu_init);
   qemu_plugin_register_vcpu_tb_trans_cb(id, on_translate);
   qemu_plugin_register_atexit_cb(id, at_exit, NULL);
   return 0;

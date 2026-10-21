@@ -19,6 +19,11 @@ let
     readelf -h $out/bin/probe | grep -q 'Type: *EXEC'
   '';
 
+  threads = pkgs.runCommandCC "vestigia-probe-threads" { } ''
+    mkdir -p $out/bin
+    cc -O0 -pthread -o $out/bin/threads ${../etc/probe/threads.c}
+  '';
+
   secrets = [ "00000005" "0000003a" "000000c3" ];
   objects = [ "/bin/probe" ];
 
@@ -58,5 +63,18 @@ pkgs.runCommand "vestigia-probe-check" {
   check ${diff}/diff.json \
     '[.origins[] | [.class, .frames[0].function]] | unique' \
     '${builtins.toJSON expected.diff}'
+
+  # a guest that starts a second thread is stopped, and its dump
+  # refused
+  v=${vestigia.vestigia}/bin/vestigia
+  if $v record --dump threads -- ${threads}/bin/threads; then
+    echo "probe: a guest's second thread was recorded" >&2
+    exit 1
+  fi
+  if $v diff threads threads 2> refusal; then
+    echo "probe: a stopped guest's dump was compared" >&2
+    exit 1
+  fi
+  grep -q 'second thread' refusal
   touch $out
 ''
