@@ -49,7 +49,7 @@ let
         path = vestigia.lib.${system}.traceOf {
           name = "poly1305-${name}";
           harness = bin;
-          args = [ "4" "1" ];
+          runs = [ [ "4" "1" ] ];
         }; }
       { name = "diff";
         path = vestigia.lib.${system}.diffOf {

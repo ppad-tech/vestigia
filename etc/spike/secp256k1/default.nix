@@ -53,7 +53,7 @@ let
         path = vestigia.lib.${system}.traceOf {
           name = "secp256k1-${name}";
           harness = bin;
-          args = [ "2" "1" ];
+          runs = [ [ "2" "1" ] ];
         }; }
       { name = "diff";
         path = vestigia.lib.${system}.diffOf {
