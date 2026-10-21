@@ -4,43 +4,48 @@
   * Initial version, with two instruments over a harness that marks
     its secret (`vestigia.h`, defined by `vestigia.c`, which serves
     a foreign function interface too and records where the loader
-    put each object):
-    * `vestigia run`: the harness under memcheck with the secret's
-      bytes undefined, reporting each branch, address, and integer
-      division operand computed from them, the last through a
-      memcheck patch, each at its own instruction; `--dir` keeps the
-      run, and `vestigia read` reports on several kept runs, or
-      memcheck XML made elsewhere, as one (vestigia/trace-v2: each
-      run with its command, exit, and objects, each site with the
-      runs that reached it).
-    * `vestigia record` and `vestigia diff`: the harness under QEMU
-      with vestigia's plugin, its leakage trace summarised per
-      instruction, and where runs differing only in the secret
-      diverge (vestigia/diff-v3: each run with how it was made, each
-      origin with the runs alike there and the runs that never
-      reached it, a branch taking its outcomes in another order an
-      origin too, a return never one, an integer division on other
-      operands an `operand` origin, each origin with the calls that
-      reached it, and what ran downstream listed per object), set
-      against controls repeating a secret, with
-      what every run executed in each object, and runs designed to
-      reach particular paths compared for control and coverage alone
-      (`--designed`);
-      runs are recorded, an x86_64 or aarch64 harness on either
-      host, with randomisation off (or not at all) and the guest's
-      entropy, its getrandom included, seeded, and QEMU's own
-      allocations kept off the guest's mappings, which under load
-      can otherwise take the room of a guest library or heap; `diff`
-      refuses runs that loaded an object at different addresses,
-      runs of another program or with arguments or an environment
-      of another size than the first run's, and a control that does
-      not repeat the first run's arguments; a guest that starts a
-      second thread is stopped and its dump refused. A taint run
-      that marked no secret is refused.
-  * `traceOf` and `diffOf` run either as a derivation, over a list
-    of runs;
-    `nix/lib.nix` holds them for any package set, with the version
-    the command reports.
+    put each object). A taint run that marked no secret is refused.
+  * `vestigia run`: the harness under memcheck with the secret's
+    bytes undefined, reporting each branch, address, and integer
+    division operand computed from them (the last through a memcheck
+    patch, `nix/memcheck-operand.patch`), each at its own
+    instruction. `--dir` keeps a run, and `vestigia read` reports on
+    several kept runs, or memcheck XML made elsewhere, as one
+    (vestigia/trace-v2: each run with its command, exit, and
+    objects; each site with the runs that reached it).
+  * `vestigia record` and `vestigia diff`: the harness under QEMU
+    with vestigia's plugin, its leakage trace summarised per
+    instruction, and where runs differing only in the secret diverge
+    (vestigia/diff-v3):
+    * each run with how it was made, its arguments and exit status;
+    * the origins: a branch taking its outcomes in another proportion
+      or order, an instruction touching other addresses, and an
+      integer division on other operands, a return never one; each
+      with the runs alike there, the runs that never reached it, and
+      the calls that reached it;
+    * what ran downstream, and what every run executed, per object;
+    * controls repeating a secret, what differs in them set apart as
+      unsteady, and runs designed to reach particular paths, compared
+      for control and coverage alone (`--designed`).
+  * `record` runs an x86_64 or aarch64 harness on either host, with
+    randomisation off (or not at all), the guest's entropy, its
+    getrandom included, seeded, and QEMU's own allocations kept off
+    the guest's mappings, which under load can otherwise take the
+    room of a guest library or heap. The plugin names each
+    instruction by its address in its object, and stops a guest that
+    starts a second thread.
+  * `diff` refuses runs that loaded an object at different
+    addresses; runs of another program, or with arguments or an
+    environment of another size, than the first run's; a control
+    that does not repeat the first run's arguments; and a stopped
+    guest's dump. It names sources with LLVM's addr2line.
+  * `traceOf` and `diffOf` run either as a derivation, over a list of
+    runs; `nix/lib.nix` holds them for any package set, with the
+    version the command reports.
   * `--object` keeps a taint run's sites (`run`, `read`, and
     `traceOf`'s `objects`) to objects whose path contains the given
     text, as it keeps a differential run's origins.
+  * The flake's probe check (`checks.<system>.probe`, on Linux) holds
+    both instruments' reports on a known harness to what it does, and
+    on an x86_64 host the differential one on the same harness built
+    for aarch64.

@@ -84,11 +84,12 @@ An *origin* is a branch whose outcomes differ between runs, in
 proportion or in order (`control`), an instruction whose addresses
 differ (`address`), or a division, whose time depends on its
 operands, on other operands (`operand`). Each names the runs that
-behaved alike there, and the calls that reached it, kept by the
-plugin as a shadow stack, as memcheck gives a site's callers. Instructions that
-merely ran a different number of times are listed as downstream, as
-are returns whose targets differ, which go where their calls sent
-them; and every instruction some run executed is listed as coverage.
+behaved alike there, and the calls that reached it, which the plugin
+keeps as a shadow stack, as memcheck gives a site its callers.
+Instructions that merely ran a different number of times are listed
+as downstream, as are returns whose targets differ, which go where
+their calls sent them; and every instruction some run executed is
+listed as coverage.
 
 * `--control DUMP` repeats the first run's secret; whatever differs
   between the two is *unsteady* and kept out of the origins.
@@ -161,18 +162,29 @@ ppad-poly1305, and ppad-secp256k1.
   is stopped, and its dump refused. Runs compared by `diff` must
   differ only in the secret; it checks their arguments and
   environments, not what the harness reads beyond them.
+* An address origin can be an address that an earlier secret branch
+  moved, a heap block or stack frame laid out apart, rather than one
+  computed from the secret.
+* Divisions alone are read for their operands. Floating-point
+  division and square root, and multiplication on cores that time it
+  by its operands, are left to a timing instrument.
 * A GHC harness wants `-with-rtsopts=-xr1G -V0`, against the
-  runtime's terabyte reservation and its interval timer.
+  runtime's terabyte reservation and its interval timer. GHC calls
+  and returns by jumping, so its origins have no callers, and a
+  return to a continuation is not known as a return.
 * Source lines need line tables.
 
 ## Development
 
 You'll require [Nix][nixos] with [flake][flake] support enabled.
 Enter a development shell with `nix develop`, then `cabal build` and
-`cabal test`. The spikes under `etc/spike` run on an `x86_64-linux`
-builder:
+`cabal test`. The probe check runs `etc/probe/harness.c` under both
+instruments, and the same harness built for aarch64 differentially,
+holding each report to what the harness does; it and the spikes under
+`etc/spike` run on an `x86_64-linux` builder:
 
 ```
+$ nix build .#checks.x86_64-linux.probe
 $ nix build --impure -f etc/spike/penumbra traces
 ```
 
