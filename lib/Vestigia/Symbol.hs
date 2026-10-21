@@ -8,11 +8,9 @@
 -- Maintainer: Jared Tobin <jared@ppad.tech>
 --
 -- Naming an instruction by its source: binutils' addr2line over an
--- object's debug information, inlined frames included. An object's
--- file offset is taken as its virtual address, which holds for the
--- executable segments of what GNU ld and lld emit; an object that
--- does not satisfy it names its sites wrongly, not silently: its
--- functions will not match its disassembly.
+-- object's debug information, inlined frames included, at the
+-- instruction's address in the object (where the object's program
+-- headers place it, as its disassembly does).
 
 module Vestigia.Symbol (
     Place(..)
@@ -36,7 +34,7 @@ data Place = Place {
   , plLine :: !(Maybe Int)
   } deriving (Eq, Show)
 
--- | The source of each offset, per object, by one addr2line call
+-- | The source of each address, per object, by one addr2line call
 --   per object. An object addr2line cannot read names nothing.
 symbolize
   :: FilePath -> [(T.Text, Integer)]

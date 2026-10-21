@@ -20,14 +20,19 @@
  *
  * At exit it writes, to the file named by its `out` argument:
  *
- *   I <pc> <count> <accesses> <fingerprint> <order> <object> <offset>
+ *   I <pc> <count> <accesses> <fingerprint> <order> <object> <address>
  *   E <from> <to> <count>
  *
  * in hex, where <object> is the file the instruction's bytes were
- * mapped from ("-" if none) and <offset> its offset in that file.
+ * mapped from ("-" if none, or if the file's program headers cannot
+ * be read) and <address> its address in that file: where the file's
+ * program headers place it, as its disassembly and line tables name
+ * it. In a shared library that is often the instruction's offset in
+ * the file; in an executable linked at a fixed address it is not.
  *
  * A single-threaded guest is assumed: the state below is unlocked.
  */
+#include <elf.h>
 #include <glib.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -158,6 +163,70 @@ static const Region *region_of(GArray *rs, uintptr_t a) {
   return NULL;
 }
 
+/* a file's loadable segments, by which a file offset is placed at
+   the address the file's own disassembly gives it */
+typedef struct Segments {
+  guint n;
+  Elf64_Phdr *load;
+} Segments;
+
+static Segments *read_segments(const char *path) {
+  FILE *f = fopen(path, "rb");
+  Elf64_Ehdr eh;
+  Segments *s = NULL;
+  if (f == NULL) return NULL;
+  /* a little-endian ELF64 object, as x86_64 and aarch64 build */
+  if (fread(&eh, sizeof eh, 1, f) != 1
+      || memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0
+      || eh.e_ident[EI_CLASS] != ELFCLASS64
+      || eh.e_ident[EI_DATA] != ELFDATA2LSB
+      || eh.e_phentsize != sizeof(Elf64_Phdr)
+      || fseek(f, (long)eh.e_phoff, SEEK_SET) != 0) {
+    fclose(f);
+    return NULL;
+  }
+  s = g_new0(Segments, 1);
+  s->load = g_new0(Elf64_Phdr, eh.e_phnum);
+  for (guint k = 0; k < eh.e_phnum; k++) {
+    Elf64_Phdr ph;
+    if (fread(&ph, sizeof ph, 1, f) != 1) {
+      g_free(s->load);
+      g_free(s);
+      fclose(f);
+      return NULL;
+    }
+    if (ph.p_type == PT_LOAD) s->load[s->n++] = ph;
+  }
+  fclose(f);
+  return s;
+}
+
+/* the segments of the file at a path, read once; NULL if they cannot
+   be read, which is said once */
+static Segments *segments_of(GHashTable *cache, const char *path) {
+  gpointer v;
+  if (g_hash_table_lookup_extended(cache, path, NULL, &v)) return v;
+  Segments *s = read_segments(path);
+  if (s == NULL)
+    fprintf(stderr, "vestigia-qemu: cannot read the program headers "
+            "of %s; its instructions are named by no object\n", path);
+  g_hash_table_insert(cache, g_strdup(path), s);
+  return s;
+}
+
+/* where a file's segments place the byte at a file offset */
+static gboolean address_in(const Segments *s, uint64_t off,
+                           uint64_t *addr) {
+  for (guint k = 0; k < s->n; k++) {
+    const Elf64_Phdr *p = &s->load[k];
+    if (off >= p->p_offset && off - p->p_offset < p->p_filesz) {
+      *addr = p->p_vaddr + (off - p->p_offset);
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
 static void at_exit(qemu_plugin_id_t id, void *p) {
   (void)id;
   (void)p;
@@ -167,17 +236,21 @@ static void at_exit(qemu_plugin_id_t id, void *p) {
     return;
   }
   GArray *rs = read_maps();
+  GHashTable *segs = g_hash_table_new(g_str_hash, g_str_equal);
   GHashTableIter it;
   gpointer key, val;
   g_hash_table_iter_init(&it, insns);
   while (g_hash_table_iter_next(&it, &key, &val)) {
     Insn *i = val;
     const Region *r = region_of(rs, i->haddr);
-    if (r != NULL)
+    Segments *s = r != NULL ? segments_of(segs, r->path) : NULL;
+    uint64_t addr;
+    if (s != NULL
+        && address_in(s, (uint64_t)(i->haddr - r->start) + r->offset,
+                      &addr))
       fprintf(out, "I %" PRIx64 " %" PRIx64 " %" PRIx64 " %016" PRIx64
               " %016" PRIx64 " %s %" PRIx64 "\n", i->pc, i->count,
-              i->accesses, i->fingerprint, i->order, r->path,
-              (uint64_t)(i->haddr - r->start) + r->offset);
+              i->accesses, i->fingerprint, i->order, r->path, addr);
     else
       fprintf(out, "I %" PRIx64 " %" PRIx64 " %" PRIx64 " %016" PRIx64
               " %016" PRIx64 " - 0\n", i->pc, i->count, i->accesses,

@@ -81,7 +81,8 @@ import Numeric (readHex, showHex)
 import Vestigia.Json
 import Vestigia.Symbol (Place(..))
 
--- | One instruction of a run.
+-- | One instruction of a run: its run-time address, and its object
+--   and address there, where the object's program headers place it.
 data Insn = Insn {
     inPc :: !Integer
   , inCount :: !Integer
@@ -130,7 +131,7 @@ readDump t = go (T.lines t) M.empty M.empty
       _ -> Left ("not hexadecimal: " <> T.unpack x)
 
 -- | Where a run loaded each object it executed: any of its
---   instructions' addresses less its offset in the object.
+--   instructions' run-time addresses less its address in the object.
 loadBases :: Dump -> M.Map T.Text Integer
 loadBases d = M.fromList
   [ (o, inPc i - inOffset i)

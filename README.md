@@ -141,8 +141,7 @@ ppad-poly1305, and ppad-secp256k1.
   `diff` must differ only in the secret, argument lengths included.
 * A GHC harness wants `-with-rtsopts=-xr1G -V0`, against the
   runtime's terabyte reservation and its interval timer.
-* Source lines need line tables, and sites assume an object's file
-  offsets are its virtual addresses, as GNU ld and lld emit them.
+* Source lines need line tables.
 
 ## Development
 

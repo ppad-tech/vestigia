@@ -6,13 +6,17 @@
 let
   lib = pkgs.lib;
 
+  # linked at a fixed address, where an instruction's address in the
+  # file is not its offset there
   probe = pkgs.runCommandCC "vestigia-probe" {
     buildInputs = [ vestigia.valgrindDev ];
+    hardeningDisable = [ "fortify" ];
   } ''
     mkdir -p $out/bin
-    cc -O0 -g -fPIE -pie -I${vestigia.include}/include \
+    cc -O0 -g -fno-pie -no-pie -I${vestigia.include}/include \
       -o $out/bin/probe ${../etc/probe/harness.c} \
       ${vestigia.include}/include/vestigia.c
+    readelf -h $out/bin/probe | grep -q 'Type: *EXEC'
   '';
 
   secrets = [ "00000005" "0000003a" "000000c3" ];
