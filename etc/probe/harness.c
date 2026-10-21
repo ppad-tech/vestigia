@@ -7,8 +7,8 @@
  *
  * Its secret, the first argument in hex (of one width for every
  * secret, so that runs lay out alike), reaches a loop's bound, a
- * table index, and which of two calls a helper returns to; a
- * constant-time select reaches none of them.
+ * table index, which of two calls a helper returns to, a dividend,
+ * and a divisor; a constant-time select reaches none of them.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +16,7 @@
 #include "vestigia.h"
 
 static unsigned char table[256];
+static volatile unsigned modulus = 3329;
 
 __attribute__((noinline)) unsigned branchy(unsigned s) {
   unsigned r = 0;
@@ -42,6 +43,34 @@ __attribute__((noinline)) unsigned calls(unsigned s) {
   return r;
 }
 
+/* a secret divided by a public modulus, the divisor in a register */
+__attribute__((noinline)) unsigned divide(unsigned s) {
+#if defined(__x86_64__)
+  unsigned q, r;
+  __asm__ volatile("divl %4"
+                   : "=a"(q), "=d"(r)
+                   : "a"(s * 2654435761u), "d"(0u), "r"(modulus));
+  return q ^ r;
+#else
+  return (s * 2654435761u) / modulus;
+#endif
+}
+
+/* a public value divided by a secret, which x86_64 reads from memory
+   as the division's operand */
+__attribute__((noinline)) unsigned divide_memory(unsigned s) {
+  unsigned d = (s & 0xffu) | 1u;
+#if defined(__x86_64__)
+  unsigned q, r;
+  __asm__ volatile("divl %4"
+                   : "=a"(q), "=d"(r)
+                   : "a"(1000003u), "d"(0u), "m"(d));
+  return q ^ r;
+#else
+  return 1000003u / d;
+#endif
+}
+
 __attribute__((noinline)) unsigned ct(unsigned s, unsigned p) {
   unsigned m = 0u - (p & 1u);
   return (s & m) | (~s & ~m);
@@ -49,14 +78,17 @@ __attribute__((noinline)) unsigned ct(unsigned s, unsigned p) {
 
 int main(int argc, char **argv) {
   unsigned s = (unsigned)strtoul(argc > 1 ? argv[1] : "0", NULL, 16);
-  unsigned out[4];
+  unsigned out[6];
   for (int i = 0; i < 256; i++) table[i] = (unsigned char)i;
   vestigia_secret(&s, sizeof s);
   out[0] = branchy(s);
   out[1] = lookup(s);
   out[2] = calls(s);
-  out[3] = ct(s, 1);
+  out[3] = divide(s);
+  out[4] = divide_memory(s);
+  out[5] = ct(s, 1);
   vestigia_public(out, sizeof out);
-  printf("%u %u %u %u\n", out[0], out[1], out[2], out[3]);
+  printf("%u %u %u %u %u %u\n", out[0], out[1], out[2], out[3], out[4],
+         out[5]);
   return 0;
 }

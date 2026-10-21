@@ -259,6 +259,25 @@ diffTests = testGroup "diff"
         @?= [ (ControlOrigin, 0x10), (AddressOrigin, 0x20) ]
       fmap inPc (dvDownstream dv) @?= [ 0x30, 0x50 ]
 
+  , testCase "a division on other operands is an operand origin" $ do
+      -- 0x40 divides once in every run, on other operands in B; in a
+      -- designed run, on others again
+      a <- either assertFailure pure (readDump (dumpA <> "D 40 1111\n"))
+      b <- either assertFailure pure (readDump (dumpB <> "D 40 2222\n"))
+      x <- either assertFailure pure (readDump (dumpA <> "D 40 3333\n"))
+      let dv = diffDumps [ a, b ]
+      fmap (\(o, i) -> (o, inPc i)) (dvOrigins dv)
+        @?= [ (ControlOrigin, 0x10), (AddressOrigin, 0x20)
+            , (OperandOrigin, 0x40) ]
+      M.lookup (OperandOrigin, 0x40) (dvBehaviour (diffDumps [ a, b, a ]))
+        @?= Just ([ [ 0, 2 ], [ 1 ] ], [])
+      notElem 0x40 (fmap inPc (dvDownstream dv)) @? "downstream"
+      -- a designed run's operands say nothing of the secret
+      fmap (\(o, i) -> (o, inPc i)) (dvOrigins (diffDesigned [] [ a, a ]
+        [ x ])) @?= []
+      -- a control dividing other operands sets it apart as unsteady
+      fmap inPc (dvUnsteady (diffControlled [ x ] [ a, b ])) @?= [ 0x40 ]
+
   , testCase "identical runs have no origins" $ do
       a <- either assertFailure pure (readDump dumpA)
       let dv = diffDumps [ a, a ]

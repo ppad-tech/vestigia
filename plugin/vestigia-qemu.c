@@ -16,24 +16,30 @@
  * transfers as often in another order, and an instruction run as
  * often but touching other addresses computed one from the secret.
  * Nothing needs aligning, and no taint is propagated, so effects of
- * control flow are seen as well as those of data flow. It marks the
- * instructions that return (x86_64's and aarch64's), which go where
- * the call before them sent them.
+ * control flow are seen as well as those of data flow.
+ *
+ * It reads each instruction's bytes, x86_64's or aarch64's, for two
+ * kinds. A return goes where the call before it sent it, and is
+ * marked. An integer division takes a time that depends on its
+ * operands, so it gets an order-sensitive fingerprint of their
+ * values: the dividend and a register divisor read before it runs,
+ * and a divisor in memory as it is loaded. A division run as often
+ * but on other operands computed them from the secret.
  *
  * At exit it writes, to the file named by its `out` argument:
  *
  *   I <pc> <count> <accesses> <fingerprint> <order> <object> <address>
  *   E <from> <to> <count>
  *   R <pc>
- *
- * or, for a guest that started a second thread, the line `T 2` alone.
+ *   D <pc> <operands>
  *
  * in hex, where <object> is the file the instruction's bytes were
  * mapped from ("-" if none, or if the file's program headers cannot
  * be read) and <address> its address in that file: where the file's
  * program headers place it, as its disassembly and line tables name
  * it. In a shared library that is often the instruction's offset in
- * the file; in an executable linked at a fixed address it is not.
+ * the file; in an executable linked at a fixed address it is not. A
+ * guest that started a second thread gets the line `T 2` alone.
  *
  * The state below is unlocked, so one guest thread is recorded: a
  * guest that starts a second one is stopped there, its dump saying
@@ -52,17 +58,30 @@
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
 /* what an instruction is to a comparison, read from its bytes */
-enum { PLAIN, RETURN };
+enum { PLAIN, RETURN, DIVISION };
+
+/* registers by number: x86_64's in ModRM order, aarch64's X0 to X30;
+   aarch64's 31 is the zero register where a division names it */
+enum { RAX = 0, RDX = 2, ZR = 31, GPRS = 32 };
+
+typedef struct Decoded {
+  int kind;
+  /* a division's: its width in bits; on aarch64 its two registers,
+     on x86_64 its divisor's (-1 in memory), that register's second
+     byte where `high`, the dividend being RDX:RAX or AX */
+  int width, a, b, high;
+} Decoded;
 
 typedef struct Insn {
   uint64_t pc;
   uint64_t size;
   uintptr_t haddr;
-  int kind;
+  Decoded d;
   uint64_t count;
   uint64_t accesses;
   uint64_t fingerprint;
   uint64_t order;   /* the successors, in the order they followed */
+  uint64_t operands; /* a division's operands, in order */
   GHashTable *succ; /* target pc -> count, for transfers */
 } Insn;
 
@@ -71,52 +90,77 @@ static Insn *prev;        /* the instruction executed last */
 static char *out_path;
 static gint vcpus;        /* the guest's threads, a vCPU each */
 static gboolean aarch64;  /* the guest's ISA: aarch64, else x86_64 */
+static struct qemu_plugin_register *gpr[GPRS];
+static GByteArray *regbuf;
 
 static const uint64_t fnv_offset = 0xcbf29ce484222325ULL;
 static const uint64_t fnv_prime = 0x100000001b3ULL;
 
-/* an x86_64 instruction's opcode: past its legacy and REX prefixes */
-static size_t x86_opcode(const uint8_t *b, size_t n) {
+static Decoded decode_aarch64(const uint8_t *b, size_t n) {
+  Decoded d = { PLAIN, 0, 0, 0, 0 };
+  uint32_t w;
+  if (n < 4) return d;
+  w = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16
+      | (uint32_t)b[3] << 24;
+  /* RET Xn, RETAA, RETAB */
+  if ((w & 0xfffffc1f) == 0xd65f0000 || w == 0xd65f0bff
+      || w == 0xd65f0fff)
+    d.kind = RETURN;
+  /* UDIV, SDIV */
+  else if ((w & 0x7fe0f800) == 0x1ac00800) {
+    d.kind = DIVISION;
+    d.width = (w >> 31) ? 64 : 32;
+    d.a = (int)((w >> 5) & 31);
+    d.b = (int)((w >> 16) & 31);
+  }
+  return d;
+}
+
+static Decoded decode_x86_64(const uint8_t *b, size_t n) {
+  Decoded d = { PLAIN, 0, 0, 0, 0 };
   size_t k = 0;
+  int opsize = 0, rex = 0;
+  /* past the legacy prefixes, then a REX */
   while (k < n && (b[k] == 0x66 || b[k] == 0x67 || b[k] == 0xf0
                    || b[k] == 0xf2 || b[k] == 0xf3 || b[k] == 0x2e
                    || b[k] == 0x36 || b[k] == 0x3e || b[k] == 0x26
-                   || b[k] == 0x64 || b[k] == 0x65))
+                   || b[k] == 0x64 || b[k] == 0x65)) {
+    if (b[k] == 0x66) opsize = 1;
     k++;
-  if (k < n && (b[k] & 0xf0) == 0x40) k++;
-  return k;
-}
-
-static int kind_of(const uint8_t *b, size_t n) {
-  if (aarch64) {
-    uint32_t w;
-    if (n < 4) return PLAIN;
-    w = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16
-        | (uint32_t)b[3] << 24;
-    /* RET Xn, RETAA, RETAB */
-    if ((w & 0xfffffc1f) == 0xd65f0000 || w == 0xd65f0bff
-        || w == 0xd65f0fff)
-      return RETURN;
-    return PLAIN;
-  } else {
-    size_t k = x86_opcode(b, n);
-    /* RET, RET imm16 */
-    if (k < n && (b[k] == 0xc3 || b[k] == 0xc2)) return RETURN;
-    return PLAIN;
   }
+  if (k < n && (b[k] & 0xf0) == 0x40) rex = b[k++];
+  if (k >= n) return d;
+  /* RET, RET imm16 */
+  if (b[k] == 0xc3 || b[k] == 0xc2) d.kind = RETURN;
+  /* DIV, IDIV: F6 or F7 with ModRM's reg 6 or 7 */
+  else if ((b[k] == 0xf6 || b[k] == 0xf7) && k + 1 < n
+           && ((b[k + 1] >> 3) & 6) == 6) {
+    int modrm = b[k + 1], rm = modrm & 7;
+    d.kind = DIVISION;
+    d.width = b[k] == 0xf6 ? 8 : (rex & 8) ? 64 : opsize ? 16 : 32;
+    if ((modrm >> 6) != 3) d.a = -1;
+    /* without REX, a byte register 4 to 7 is AH, CH, DH, or BH */
+    else if (d.width == 8 && rex == 0 && rm >= 4) {
+      d.a = rm - 4;
+      d.high = 1;
+    } else
+      d.a = rm | ((rex & 1) << 3);
+  }
+  return d;
 }
 
 static Insn *insn_at(uint64_t pc, uint64_t size, uintptr_t haddr,
-                     int kind) {
+                     Decoded d) {
   Insn *i = g_hash_table_lookup(insns, &pc);
   if (i == NULL) {
     i = g_new0(Insn, 1);
     i->pc = pc;
     i->size = size;
     i->haddr = haddr;
-    i->kind = kind;
+    i->d = d;
     i->fingerprint = fnv_offset;
     i->order = fnv_offset;
+    i->operands = fnv_offset;
     i->succ = g_hash_table_new_full(g_int64_hash, g_int64_equal,
                                     g_free, g_free);
     g_hash_table_insert(insns, &i->pc, i);
@@ -146,19 +190,95 @@ static void on_exec(unsigned int vcpu, void *udata) {
   i->count++;
 }
 
+static void mix(Insn *i, uint64_t v) {
+  i->operands = (i->operands ^ v) * fnv_prime;
+}
+
+static uint64_t read_gpr(int r) {
+  uint64_t v = 0;
+  int n;
+  if (aarch64 && r == ZR) return 0;
+  g_byte_array_set_size(regbuf, 0);
+  n = qemu_plugin_read_register(gpr[r], regbuf);
+  /* in the guest's byte order, little-endian as the host's */
+  if (n > 0) memcpy(&v, regbuf->data, MIN((size_t)n, sizeof v));
+  return v;
+}
+
+static void on_divide(unsigned int vcpu, void *udata) {
+  Insn *i = udata;
+  uint64_t mask = i->d.width == 64 ? ~0ULL : (1ULL << i->d.width) - 1;
+  (void)vcpu;
+  if (aarch64) {
+    mix(i, read_gpr(i->d.a) & mask);
+    mix(i, read_gpr(i->d.b) & mask);
+    return;
+  }
+  if (i->d.width == 8)
+    mix(i, read_gpr(RAX) & 0xffff);
+  else {
+    mix(i, read_gpr(RAX) & mask);
+    mix(i, read_gpr(RDX) & mask);
+  }
+  /* a divisor in memory is mixed in as it is loaded */
+  if (i->d.a >= 0)
+    mix(i, (read_gpr(i->d.a) >> (i->d.high ? 8 : 0)) & mask);
+}
+
 static void on_mem(unsigned int vcpu, qemu_plugin_meminfo_t info,
                    uint64_t vaddr, void *udata) {
   Insn *i = udata;
   (void)vcpu;
-  (void)info;
   i->fingerprint = (i->fingerprint ^ vaddr) * fnv_prime;
   i->accesses++;
+  if (i->d.kind == DIVISION) {
+    qemu_plugin_mem_value v = qemu_plugin_mem_get_value(info);
+    switch (v.type) {
+    case QEMU_PLUGIN_MEM_VALUE_U8: mix(i, v.data.u8); break;
+    case QEMU_PLUGIN_MEM_VALUE_U16: mix(i, v.data.u16); break;
+    case QEMU_PLUGIN_MEM_VALUE_U32: mix(i, v.data.u32); break;
+    case QEMU_PLUGIN_MEM_VALUE_U64: mix(i, v.data.u64); break;
+    case QEMU_PLUGIN_MEM_VALUE_U128:
+      mix(i, v.data.u128.low);
+      mix(i, v.data.u128.high);
+      break;
+    }
+  }
+}
+
+/* the general registers a division reads, by the names QEMU's
+   debugger stub gives them */
+static void find_registers(void) {
+  static const char *x86_64[16] = {
+    "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+    "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" };
+  GArray *rs = qemu_plugin_get_registers();
+  int wanted = aarch64 ? 31 : 16;
+  for (guint k = 0; k < rs->len; k++) {
+    qemu_plugin_reg_descriptor *r =
+      &g_array_index(rs, qemu_plugin_reg_descriptor, k);
+    for (int j = 0; j < wanted; j++) {
+      char name[8];
+      if (aarch64) g_snprintf(name, sizeof name, "x%d", j);
+      if (strcmp(r->name, aarch64 ? name : x86_64[j]) == 0)
+        gpr[j] = r->handle;
+    }
+  }
+  g_array_free(rs, TRUE);
+  for (int j = 0; j < wanted; j++)
+    if (gpr[j] == NULL) {
+      fprintf(stderr, "vestigia-qemu: QEMU names no register %d, by "
+              "which a division's operands are read\n", j);
+      _exit(EXIT_FAILURE);
+    }
 }
 
 static void on_vcpu_init(qemu_plugin_id_t id, unsigned int vcpu) {
   (void)id;
   (void)vcpu;
-  if (g_atomic_int_add(&vcpus, 1) > 0) {
+  if (g_atomic_int_add(&vcpus, 1) == 0)
+    find_registers();
+  else {
     FILE *out = fopen(out_path, "w");
     if (out != NULL) {
       fprintf(out, "T 2\n");
@@ -180,9 +300,13 @@ static void on_translate(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
     Insn *i = insn_at(qemu_plugin_insn_vaddr(qi),
                       qemu_plugin_insn_size(qi),
                       (uintptr_t)qemu_plugin_insn_haddr(qi),
-                      kind_of(bytes, len));
+                      aarch64 ? decode_aarch64(bytes, len)
+                              : decode_x86_64(bytes, len));
     qemu_plugin_register_vcpu_insn_exec_cb(qi, on_exec,
                                            QEMU_PLUGIN_CB_NO_REGS, i);
+    if (i->d.kind == DIVISION)
+      qemu_plugin_register_vcpu_insn_exec_cb(qi, on_divide,
+                                             QEMU_PLUGIN_CB_R_REGS, i);
     qemu_plugin_register_vcpu_mem_cb(qi, on_mem, QEMU_PLUGIN_CB_NO_REGS,
                                      QEMU_PLUGIN_MEM_RW, i);
   }
@@ -320,7 +444,9 @@ static void at_exit(qemu_plugin_id_t id, void *p) {
       fprintf(out, "I %" PRIx64 " %" PRIx64 " %" PRIx64 " %016" PRIx64
               " %016" PRIx64 " - 0\n", i->pc, i->count, i->accesses,
               i->fingerprint, i->order);
-    if (i->kind == RETURN) fprintf(out, "R %" PRIx64 "\n", i->pc);
+    if (i->d.kind == RETURN) fprintf(out, "R %" PRIx64 "\n", i->pc);
+    if (i->d.kind == DIVISION)
+      fprintf(out, "D %" PRIx64 " %016" PRIx64 "\n", i->pc, i->operands);
     GHashTableIter jt;
     gpointer tk, tn;
     g_hash_table_iter_init(&jt, i->succ);
@@ -343,6 +469,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
     return -1;
   }
   insns = g_hash_table_new(g_int64_hash, g_int64_equal);
+  regbuf = g_byte_array_new();
   qemu_plugin_register_vcpu_init_cb(id, on_vcpu_init);
   qemu_plugin_register_vcpu_tb_trans_cb(id, on_translate);
   qemu_plugin_register_atexit_cb(id, at_exit, NULL);

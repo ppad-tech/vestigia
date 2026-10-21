@@ -10,7 +10,8 @@
 -- Where runs that differ only in a secret differ. Each run is a
 -- leakage trace summarised per instruction (the QEMU plugin's
 -- dump): how often each instruction ran, how often it transferred
--- to each target, and a fingerprint of the addresses it touched.
+-- to each target, a fingerprint of the addresses it touched, and,
+-- for an integer division, a fingerprint of its operands.
 --
 -- A branch whose outcome did not depend on the secret takes each
 -- of its transfers in the same proportion however often it runs; a
@@ -21,7 +22,9 @@
 -- taking each transfer as often, in another order: the plugin keeps
 -- an order-sensitive fingerprint of what followed each instruction.
 -- An instruction run equally often in every run whose addresses
--- differ computed one from the secret: an `address` origin. Every
+-- differ computed one from the secret: an `address` origin. A
+-- division, whose time depends on its operands, run equally often
+-- on other operands is an `operand` origin. Every
 -- other instruction run a different number of times sits where
 -- control had already diverged: it is downstream. So is a return
 -- whose transfers differ, however often it ran: it goes where the
@@ -45,8 +48,9 @@
 -- only in the secret, so an instruction's addresses differing in one
 -- of them says nothing about the secret. A designed run counts toward
 -- the control origins (a branch whose outcomes shift under it chose
--- by the secret) and what was executed, never toward the address
--- origins, which only runs alike in all but the secret can show.
+-- by the secret) and what was executed, never toward the address or
+-- operand origins, which only runs alike in all but the secret can
+-- show.
 --
 -- What every run executed, per object, is reported beside: the
 -- instructions the chosen secrets exercised, and so, against what
@@ -55,7 +59,8 @@
 -- Each origin names how the runs behaved there: the runs alike at
 -- it, grouped (taking each transfer in the same proportion, at a
 -- control origin; touching the same addresses, at an address
--- origin), and the runs that never reached it. Whether two runs
+-- origin; dividing the same operands, at an operand origin), and the
+-- runs that never reached it. Whether two runs
 -- that differed there both had their secrets accepted is the
 -- reader's to say, from what each run returned.
 
@@ -116,12 +121,14 @@ data Run = Run {
   } deriving (Eq, Show)
 
 -- | One run: its instructions by address, its transfers by source,
---   each a count per target, the instructions that return, and how
---   it was made, where its dump says.
+--   each a count per target, the instructions that return, the
+--   divisions' operands, fingerprinted, and how it was made, where
+--   its dump says.
 data Dump = Dump {
     dpInsns :: !(M.Map Integer Insn)
   , dpTransfers :: !(M.Map Integer (M.Map Integer Integer))
   , dpReturns :: !(S.Set Integer)
+  , dpOperands :: !(M.Map Integer T.Text)
   , dpRun :: !(Maybe Run)
   } deriving (Eq, Show)
 
@@ -134,12 +141,13 @@ data Dump = Dump {
 --   bytes, in hex; @X@, the exit status, in decimal) is read whole or
 --   not at all.
 readDump :: T.Text -> Either String Dump
-readDump t = go (T.lines t) M.empty M.empty S.empty [] Nothing Nothing
+readDump t =
+  go (T.lines t) M.empty M.empty S.empty M.empty [] Nothing Nothing
   where
-    go ls is es rs as env st = case ls of
+    go ls is es rs ds as env st = case ls of
       []
         | any ((> 0) . inCount) (M.elems is) ->
-            Dump is es rs <$> record (reverse as) env st
+            Dump is es rs ds <$> record (reverse as) env st
         | otherwise ->
             Left "no instruction ran: the run was not recorded"
       (l : rest) -> case T.words l of
@@ -148,30 +156,33 @@ readDump t = go (T.lines t) M.empty M.empty S.empty [] Nothing Nothing
                     <*> pure ord
                     <*> pure (if obj == "-" then Nothing else Just obj)
                     <*> unhex off
-          go rest (M.insert (inPc i) i is) es rs as env st
+          go rest (M.insert (inPc i) i is) es rs ds as env st
         [ "E", from, to, n ] -> do
           f <- unhex from
           k <- unhex to
           c <- unhex n
           go rest is (M.insertWith M.union f (M.singleton k c) es)
-            rs as env st
+            rs ds as env st
         [ "R", pc ] -> do
           r <- unhex pc
-          go rest is es (S.insert r rs) as env st
+          go rest is es (S.insert r rs) ds as env st
+        [ "D", pc, fp ] -> do
+          k <- unhex pc
+          go rest is es rs (M.insert k fp ds) as env st
         [ "T", _ ] ->
           Left "the guest started a second thread, which a trace \
                \cannot record: the run was stopped"
-        [ "A" ] -> go rest is es rs (BS.empty : as) env st
+        [ "A" ] -> go rest is es rs ds (BS.empty : as) env st
         [ "A", h ] -> do
           b <- unhexBytes h
-          go rest is es rs (b : as) env st
+          go rest is es rs ds (b : as) env st
         [ "N", n, b ] -> do
           v <- (,) <$> unhex n <*> unhex b
-          go rest is es rs as (Just v) st
+          go rest is es rs ds as (Just v) st
         [ "X", x ] -> case readMaybe (T.unpack x) of
-          Just v -> go rest is es rs as env (Just v)
+          Just v -> go rest is es rs ds as env (Just v)
           Nothing -> Left ("not an exit status: " <> T.unpack x)
-        [] -> go rest is es rs as env st
+        [] -> go rest is es rs ds as env st
         _ -> Left ("an unreadable dump line: " <> T.unpack l)
     record as env st = case (as, env, st) of
       ([], Nothing, Nothing) -> pure Nothing
@@ -242,6 +253,7 @@ layoutApart a b =
 data Origin =
     ControlOrigin
   | AddressOrigin
+  | OperandOrigin
   deriving (Eq, Ord, Show)
 
 -- | Where the runs differ: the origins, each an instruction run
@@ -251,7 +263,8 @@ data Divergence = Divergence {
     dvOrigins :: ![(Origin, Insn)]
     -- | at each origin, the runs alike there, grouped, and the runs
     --   that never reached it, as indices into the declared runs
-    --   then the designed (an address origin's, the declared alone)
+    --   then the designed (an address or operand origin's, the
+    --   declared alone)
   , dvBehaviour :: !(M.Map (Origin, Integer) ([[Int]], [Int]))
   , dvDownstream :: ![Insn]
   , dvUnsteady :: ![Insn]
@@ -274,8 +287,9 @@ diffControlled :: [Dump] -> [Dump] -> Divergence
 diffControlled cs ds = diffDesigned cs ds []
 
 -- | Compare runs, given controls and runs designed to reach particular
---   paths. The address origins are the declared runs' alone; the
---   control origins and what was executed are every run's.
+--   paths. The address and operand origins are the declared runs'
+--   alone; the control origins and what was executed are every
+--   run's.
 diffDesigned :: [Dump] -> [Dump] -> [Dump] -> Divergence
 diffDesigned cs ds xs = Divergence {
     dvOrigins = L.sortOn (inPc . snd) origins
@@ -309,10 +323,11 @@ diffDesigned cs ds xs = Divergence {
             ib = M.lookup pc (dpInsns b)
             ta = M.lookup pc (dpTransfers a)
             tb = M.lookup pc (dpTransfers b)
-      , fmap sig ia /= fmap sig ib || ta /= tb ]
+      , fmap sig ia /= fmap sig ib || ta /= tb
+          || M.lookup pc (dpOperands a) /= M.lookup pc (dpOperands b) ]
     sig i = (inCount i, inFingerprint i, inOrder i)
 
-    origins = [ o | o@(_, i) <- controls <> addresses
+    origins = [ o | o@(_, i) <- controls <> addresses <> operands
                   , not (inPc i `S.member` unsteady) ]
 
     -- every run, the declared first
@@ -320,7 +335,7 @@ diffDesigned cs ds xs = Divergence {
 
     -- how the runs behaved at an origin: those that ran it, grouped
     -- by what they did there, and those that never ran it. Only the
-    -- declared runs speak to an address.
+    -- declared runs speak to an address or an operand.
     behaviourAt o pc = case o of
       ControlOrigin ->
         ( classes outcomesAlike
@@ -330,6 +345,10 @@ diffDesigned cs ds xs = Divergence {
         , absentIn runs )
       AddressOrigin ->
         ( classes (==) [ (k, inFingerprint i) | (k, _, i) <- ranIn ds ]
+        , absentIn ds )
+      OperandOrigin ->
+        ( classes (==)
+            [ (k, M.lookup pc (dpOperands d)) | (k, d, _) <- ranIn ds ]
         , absentIn ds )
       where
         ranIn rs = [ (k, d, i) | (k, d) <- zip [ 0 .. ] rs
@@ -385,12 +404,13 @@ diffDesigned cs ds xs = Divergence {
     returns = S.unions (fmap dpReturns runs)
     divergentPcs = S.filter divergent transferSources
     controlPcs = divergentPcs `S.difference` returns
-    addressPcs = S.fromList [ inPc i | (_, i) <- addresses ]
+    -- the address and operand origins
+    dataPcs = S.fromList [ inPc i | (_, i) <- addresses <> operands ]
     downstream =
       (((pcs `S.difference` steady)
          `S.union` (divergentPcs `S.intersection` returns))
          `S.difference` controlPcs)
-      `S.difference` addressPcs
+      `S.difference` dataPcs
 
     controls =
       [ (ControlOrigin, i)
@@ -405,6 +425,16 @@ diffDesigned cs ds xs = Divergence {
       , not (alike fps)
       , Just i <- [ firstInsn pc ]
       , inAccesses i > 0 ]
+
+    -- a division run equally often in every declared run, on other
+    -- operands in one
+    operands =
+      [ (OperandOrigin, i)
+      | pc <- S.toAscList steadyDeclared
+      , let fps = [ M.lookup pc (dpOperands d) | d <- ds ]
+      , any (/= Nothing) fps
+      , not (alike fps)
+      , Just i <- [ firstInsn pc ] ]
 
 -- | Only the origins, what was executed, and what ran downstream, in
 --   objects whose path contains one of the given texts.
@@ -426,6 +456,7 @@ originText :: Origin -> T.Text
 originText o = case o of
   ControlOrigin -> "control"
   AddressOrigin -> "address"
+  OperandOrigin -> "operand"
 
 -- | The report: @vestigia/diff-v3@. Runs are given the declared,
 --   then the designed, then the controls, and an origin names the
@@ -450,6 +481,7 @@ divergenceJson version runs places dv = Object
   , ("summary", Object
       [ ("control", count ControlOrigin)
       , ("address", count AddressOrigin)
+      , ("operand", count OperandOrigin)
       , ("downstream", Number (toInteger (length (dvDownstream dv))))
       , ("unsteady", Number (toInteger (length (dvUnsteady dv))))
       ])

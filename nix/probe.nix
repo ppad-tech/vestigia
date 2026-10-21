@@ -54,7 +54,8 @@ let
     trace = [ [ "address" "lookup" ] [ "control" "branchy" ]
               [ "control" "calls" ] ];
     diff = [ [ "address" "lookup" ] [ "control" "branchy" ]
-             [ "control" "calls" ] ];
+             [ "control" "calls" ] [ "operand" "divide" ]
+             [ "operand" "divide_memory" ] ];
   };
 in
 pkgs.runCommand "vestigia-probe-check" {

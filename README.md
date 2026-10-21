@@ -57,9 +57,10 @@ control  0x4878d4d  next<&[u64]>                 bits.rs:32  x982
 ### Differential traces: `vestigia record` and `vestigia diff`
 
 `record` runs the harness under QEMU with a plugin that summarises,
-per instruction, how often it ran, where it branched, and which
-addresses it touched. Record several runs differing only in the
-secret, and `diff` reports where they diverge:
+per instruction, how often it ran, where it branched, which addresses
+it touched, and, for an integer division, which operands it divided.
+Record several runs differing only in the secret, and `diff` reports
+where they diverge:
 
 ```
 $ for s in 1 2 3; do
@@ -75,8 +76,10 @@ address  0x152c8  Fq::sqrt_ratio_zeta                 invsqrt.rs:113  ...
 ```
 
 An *origin* is a branch whose outcomes differ between runs, in
-proportion or in order, or an instruction whose addresses differ.
-Each names the runs that behaved alike there. Instructions that
+proportion or in order (`control`), an instruction whose addresses
+differ (`address`), or a division, whose time depends on its
+operands, on other operands (`operand`). Each names the runs that
+behaved alike there. Instructions that
 merely ran a different number of times are listed as downstream, as
 are returns whose targets differ, which go where their calls sent
 them; and every instruction some run executed is listed as coverage.
@@ -85,7 +88,7 @@ them; and every instruction some run executed is listed as coverage.
   between the two is *unsteady* and kept out of the origins.
 * `--designed DUMP` is a run whose secret was chosen to reach a
   particular path. It counts toward control origins and coverage,
-  never toward address origins.
+  never toward address or operand origins.
 * `--object TEXT` keeps the report to matching objects.
 
 `record` disables address-space randomisation and seeds the guest's
