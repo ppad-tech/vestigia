@@ -386,6 +386,19 @@ symbolTests = testGroup "symbol"
         @?= [ (0x1234, [ Place (Just "inner") (Just "/src/a.rs") (Just 12)
                        , Place (Just "outer") (Just "/src/b.rs") (Just 40) ])
             , (0x5678, [ Place Nothing Nothing Nothing ]) ]
+
+  , testCase "a legacy Rust name's escapes and hash undone" $ do
+      rustLegacy "decaf377::ark_curve::encoding::_$LT$impl$u20$decaf377\
+                 \..ark_curve..element..projective..Element$GT$::vartime\
+                 \_compress_to_field::h346fee1681a4f34f"
+        @?= "decaf377::ark_curve::encoding::<impl decaf377::ark_curve::\
+            \element::projective::Element>::vartime_compress_to_field"
+      rustLegacy "_$LT$$RF$T$u20$as$u20$core..fmt..Debug$GT$::fmt::\
+                 \h0123456789abcdef"
+        @?= "<&T as core::fmt::Debug>::fmt"
+      -- a C++ name, or one without a hash, is left as it is
+      rustLegacy "std::vector<int>::size" @?= "std::vector<int>::size"
+      rustLegacy "a::b$LT$c" @?= "a::b$LT$c"
   ]
 
 jsonTests :: TestTree

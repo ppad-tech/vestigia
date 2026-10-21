@@ -52,7 +52,8 @@ let
   '';
 
   # the command, with the valgrind it was built against baked in,
-  # and an addr2line that reads either ISA's objects
+  # and LLVM's addr2line, which reads either ISA's objects and names
+  # inlined frames by their own functions (Vestigia.Symbol)
   vestigia = pkgs.runCommand "vestigia" {
     nativeBuildInputs = [ pkgs.makeWrapper ];
   } ''
@@ -65,7 +66,7 @@ let
         "--set-default VESTIGIA_PLUGIN"
         "${plugin}/lib/libvestigia-qemu.so"
         "--set-default VESTIGIA_ADDR2LINE"
-        "${pkgs.binutils-unwrapped-all-targets}/bin/addr2line"
+        "${pkgs.llvm}/bin/llvm-addr2line"
       ])}
     ln -s ${include}/include $out/include
   '';
