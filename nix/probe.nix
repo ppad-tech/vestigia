@@ -98,6 +98,15 @@ pkgs.runCommand "vestigia-probe-check" {
       '${builtins.toJSON expected.diff}'
   ''}
 
+  # each origin's stack runs from its own function to the call in
+  # main that reached it
+  for d in ${diff} ${lib.optionalString x86_64 "${diffCross}"}; do
+    check $d/diff.json \
+      '[.origins[] | [.stacks[0][0].function, .stacks[0][1].function]
+        | .[1]] | unique' \
+      '["main"]'
+  done
+
   # each run as it was made: the declared, then the control
   check ${diff}/diff.json \
     '[.runs[] | [.kind, .arguments[1], .status]]' \

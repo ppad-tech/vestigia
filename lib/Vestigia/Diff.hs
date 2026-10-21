@@ -69,6 +69,7 @@ module Vestigia.Diff (
   , Run(..)
   , Dump(..)
   , readDump
+  , callsOf
   , runApart
   , Kind(..)
   , Named(..)
@@ -84,6 +85,7 @@ module Vestigia.Diff (
   , divergenceSummary
   ) where
 
+import Control.Monad (foldM, unless)
 import qualified Data.ByteString as BS
 import qualified Data.List as L
 import qualified Data.Map.Strict as M
@@ -122,13 +124,18 @@ data Run = Run {
 
 -- | One run: its instructions by address, its transfers by source,
 --   each a count per target, the instructions that return, the
---   divisions' operands, fingerprinted, and how it was made, where
---   its dump says.
+--   divisions' operands, fingerprinted, the contexts calls made (each
+--   by the context it was made in and the call's address, 0 being
+--   the program's own), the contexts each instruction ran in (with
+--   whether it ran in more than the plugin kept), and how the run
+--   was made, where its dump says.
 data Dump = Dump {
     dpInsns :: !(M.Map Integer Insn)
   , dpTransfers :: !(M.Map Integer (M.Map Integer Integer))
   , dpReturns :: !(S.Set Integer)
   , dpOperands :: !(M.Map Integer T.Text)
+  , dpContexts :: !(M.Map Integer (Integer, Integer))
+  , dpCallers :: !(M.Map Integer (Bool, [Integer]))
   , dpRun :: !(Maybe Run)
   } deriving (Eq, Show)
 
@@ -136,54 +143,79 @@ data Dump = Dump {
 --   no run (the plugin writes every instruction the guest executed),
 --   and is refused rather than compared as one that did nothing, as
 --   is the dump of a guest the plugin stopped for starting a second
---   thread. The record `vestigia record` appends (an @A@ line per
---   argument, its bytes in hex; @N@, the environment's variables and
---   bytes, in hex; @X@, the exit status, in decimal) is read whole or
---   not at all.
+--   thread, or one whose contexts do not chain back to the
+--   program's own. The record `vestigia record` appends (an @A@ line
+--   per argument, its bytes in hex; @N@, the environment's variables
+--   and bytes, in hex; @X@, the exit status, in decimal) is read
+--   whole or not at all.
 readDump :: T.Text -> Either String Dump
-readDump t =
-  go (T.lines t) M.empty M.empty S.empty M.empty [] Nothing Nothing
+readDump t = do
+  d <- foldM line (Dump M.empty M.empty S.empty M.empty M.empty M.empty
+                     Nothing, [], Nothing, Nothing) (T.lines t)
+  let (dump, as, env, st) = d
+      cx = dpContexts dump
+  unless (any ((> 0) . inCount) (M.elems (dpInsns dump))) $
+    Left "no instruction ran: the run was not recorded"
+  -- each context made in one made before it, so that its calls end
+  unless (and [ c' < c && (c' == 0 || M.member c' cx)
+              | (c, (c', _)) <- M.toList cx ]) $
+    Left "a context made in one not made before it"
+  unless (and [ c == 0 || M.member c cx
+              | (_, cs) <- M.elems (dpCallers dump), c <- cs ]) $
+    Left "an instruction run in a context the dump does not make"
+  r <- record (reverse as) env st
+  pure dump { dpRun = r }
   where
-    go ls is es rs ds as env st = case ls of
-      []
-        | any ((> 0) . inCount) (M.elems is) ->
-            Dump is es rs ds <$> record (reverse as) env st
-        | otherwise ->
-            Left "no instruction ran: the run was not recorded"
-      (l : rest) -> case T.words l of
-        [ "I", pc, n, a, fp, ord, obj, off ] -> do
-          i <- Insn <$> unhex pc <*> unhex n <*> unhex a <*> pure fp
-                    <*> pure ord
-                    <*> pure (if obj == "-" then Nothing else Just obj)
-                    <*> unhex off
-          go rest (M.insert (inPc i) i is) es rs ds as env st
-        [ "E", from, to, n ] -> do
-          f <- unhex from
-          k <- unhex to
-          c <- unhex n
-          go rest is (M.insertWith M.union f (M.singleton k c) es)
-            rs ds as env st
-        [ "R", pc ] -> do
-          r <- unhex pc
-          go rest is es (S.insert r rs) ds as env st
-        [ "D", pc, fp ] -> do
-          k <- unhex pc
-          go rest is es rs (M.insert k fp ds) as env st
-        [ "T", _ ] ->
-          Left "the guest started a second thread, which a trace \
-               \cannot record: the run was stopped"
-        [ "A" ] -> go rest is es rs ds (BS.empty : as) env st
-        [ "A", h ] -> do
-          b <- unhexBytes h
-          go rest is es rs ds (b : as) env st
-        [ "N", n, b ] -> do
-          v <- (,) <$> unhex n <*> unhex b
-          go rest is es rs ds as (Just v) st
-        [ "X", x ] -> case readMaybe (T.unpack x) of
-          Just v -> go rest is es rs ds as env (Just v)
-          Nothing -> Left ("not an exit status: " <> T.unpack x)
-        [] -> go rest is es rs ds as env st
-        _ -> Left ("an unreadable dump line: " <> T.unpack l)
+    line (d, as, env, st) l = case T.words l of
+      [ "I", pc, n, a, fp, ord, obj, off ] -> do
+        i <- Insn <$> unhex pc <*> unhex n <*> unhex a <*> pure fp
+                  <*> pure ord
+                  <*> pure (if obj == "-" then Nothing else Just obj)
+                  <*> unhex off
+        pure (d { dpInsns = M.insert (inPc i) i (dpInsns d) }, as, env
+             , st)
+      [ "E", from, to, n ] -> do
+        f <- unhex from
+        k <- unhex to
+        c <- unhex n
+        pure (d { dpTransfers = M.insertWith M.union f (M.singleton k c)
+                    (dpTransfers d) }, as, env, st)
+      [ "R", pc ] -> do
+        r <- unhex pc
+        pure (d { dpReturns = S.insert r (dpReturns d) }, as, env, st)
+      [ "D", pc, fp ] -> do
+        k <- unhex pc
+        pure (d { dpOperands = M.insert k fp (dpOperands d) }, as, env
+             , st)
+      [ "C", c, caller, call ] -> do
+        v <- (,) <$> unhex caller <*> unhex call
+        k <- unhex c
+        pure (d { dpContexts = M.insert k v (dpContexts d) }, as, env
+             , st)
+      ("K" : pc : partial : cs@(_ : _)) -> do
+        k <- unhex pc
+        p <- case partial of
+          "0" -> pure False
+          "1" -> pure True
+          _ -> Left ("an unreadable dump line: " <> T.unpack l)
+        xs <- traverse unhex cs
+        pure (d { dpCallers = M.insert k (p, xs) (dpCallers d) }, as
+             , env, st)
+      [ "T", _ ] ->
+        Left "the guest started a second thread, which a trace \
+             \cannot record: the run was stopped"
+      [ "A" ] -> pure (d, BS.empty : as, env, st)
+      [ "A", h ] -> do
+        b <- unhexBytes h
+        pure (d, b : as, env, st)
+      [ "N", n, b ] -> do
+        v <- (,) <$> unhex n <*> unhex b
+        pure (d, as, Just v, st)
+      [ "X", x ] -> case readMaybe (T.unpack x) of
+        Just v -> pure (d, as, env, Just v)
+        Nothing -> Left ("not an exit status: " <> T.unpack x)
+      [] -> pure (d, as, env, st)
+      _ -> Left ("an unreadable dump line: " <> T.unpack l)
     record as env st = case (as, env, st) of
       ([], Nothing, Nothing) -> pure Nothing
       (_ : _, Just e, Just x) -> pure (Just (Run as e x))
@@ -195,6 +227,21 @@ readDump t =
       | odd (T.length h) = Left ("not hexadecimal bytes: " <> T.unpack h)
       | otherwise =
           BS.pack <$> traverse (fmap fromInteger . unhex) (T.chunksOf 2 h)
+
+-- | The calls that made a context, innermost first, at most 24 of
+--   them (as memcheck keeps): each by its object and address there,
+--   or by its run-time address where the run names no object for it.
+callsOf :: Dump -> Integer -> [(Maybe T.Text, Integer)]
+callsOf d = go (24 :: Int)
+  where
+    go n c
+      | n <= 0 || c == 0 = []
+      | otherwise = case M.lookup c (dpContexts d) of
+          Just (caller, pc) -> site pc : go (n - 1) caller
+          Nothing -> []
+    site pc = case M.lookup pc (dpInsns d) of
+      Just i | Just o <- inObject i -> (Just o, inOffset i)
+      _ -> (Nothing, pc)
 
 -- | Why a run cannot be set beside the first as differing from it in
 --   the secret alone, if it cannot: it ran another program, its
@@ -273,6 +320,10 @@ data Divergence = Divergence {
   , dvDesigned :: !Int
     -- | the offsets some run, control or not, executed, by object
   , dvExecuted :: !(M.Map T.Text (S.Set Integer))
+    -- | at each origin, the distinct chains of calls that reached it
+    --   in the declared and designed runs, at most 16 of them, and
+    --   whether there were more than those
+  , dvCallers :: !(M.Map Integer ([[(Maybe T.Text, Integer)]], Bool))
   } deriving (Eq, Show)
 
 -- | Compare runs, uncontrolled.
@@ -309,8 +360,17 @@ diffDesigned cs ds xs = Divergence {
       , i <- M.elems (dpInsns d)
       , inCount i > 0
       , Just obj <- [ inObject i ] ]
+  , dvCallers = M.fromList
+      [ (inPc i, callersAt (inPc i)) | (_, i) <- origins ]
   }
   where
+    callersAt pc =
+      let found = [ (partial, fmap (callsOf d) ks)
+                  | d <- runs
+                  , Just (partial, ks) <- [ M.lookup pc (dpCallers d) ] ]
+          stacks = L.nub (concatMap snd found)
+      in (take 16 stacks, any fst found || length stacks > 16)
+
     -- what differs between the first run and a repeat of its secret
     unsteady = case ds of
       (d : _) -> S.unions (fmap (differing d) cs)
@@ -460,7 +520,10 @@ originText o = case o of
 
 -- | The report: @vestigia/diff-v3@. Runs are given the declared,
 --   then the designed, then the controls, and an origin names the
---   runs alike at it by the first two.
+--   runs alike at it by the first two. An origin's stacks are its own
+--   frames then its calls', innermost first, each frame with the
+--   object and address of the instruction it names, as memcheck's
+--   are in a taint report.
 divergenceJson
   :: T.Text -> [Named] -> M.Map (T.Text, Integer) [Place] -> Divergence
   -> Value
@@ -493,12 +556,19 @@ divergenceJson version runs places dv = Object
           , ("offset", String (hex (inOffset i)))
           , ("count", Number (inCount i))
           , ("frames", Array (fmap placeJson (placesOf i)))
+          , ("stacks", Array
+              [ Array (located (inObject i, inOffset i)
+                         <> concatMap located calls)
+              | calls <- stacks ])
+          , ("partial", Bool partial)
           , ("groups", Array (fmap (Array . fmap named) groups))
           , ("absent", Array (fmap named absent))
           ]
       | (o, i) <- dvOrigins dv
       , let (groups, absent) = M.findWithDefault ([], []) (o, inPc i)
-              (dvBehaviour dv) ])
+              (dvBehaviour dv)
+            (stacks, partial) = M.findWithDefault ([], False) (inPc i)
+              (dvCallers dv) ])
   , ("downstream", Object
       [ (obj, Array (fmap (String . hex) (S.toAscList offs)))
       | (obj, offs) <- M.toList (M.fromListWith S.union
@@ -532,6 +602,21 @@ divergenceJson version runs places dv = Object
       , ("file", maybe Null String (plFile p))
       , ("line", maybe Null (Number . toInteger) (plLine p))
       ]
+    -- an instruction's frames, innermost first, each with where the
+    -- instruction is; one unnamed frame where nothing names it
+    located (mo, a) =
+      let at = [ ("object", maybe Null String mo)
+               , ("offset", String (hex a)) ]
+          ps = case mo of
+            Just obj -> M.findWithDefault [] (obj, a) places
+            Nothing -> []
+      in case ps of
+           [] -> [ Object (at <> [ ("function", Null), ("file", Null)
+                                 , ("line", Null) ]) ]
+           _ -> [ case placeJson p of
+                    Object kvs -> Object (at <> kvs)
+                    other -> other
+                | p <- ps ]
 
 -- | One line per origin, innermost frame first, for a terminal.
 divergenceSummary

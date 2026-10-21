@@ -84,7 +84,8 @@ An *origin* is a branch whose outcomes differ between runs, in
 proportion or in order (`control`), an instruction whose addresses
 differ (`address`), or a division, whose time depends on its
 operands, on other operands (`operand`). Each names the runs that
-behaved alike there. Instructions that
+behaved alike there, and the calls that reached it, kept by the
+plugin as a shadow stack, as memcheck gives a site's callers. Instructions that
 merely ran a different number of times are listed as downstream, as
 are returns whose targets differ, which go where their calls sent
 them; and every instruction some run executed is listed as coverage.

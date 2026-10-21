@@ -17,6 +17,7 @@ import Control.Exception (IOException, try)
 import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
 import Data.Char (toUpper)
+import qualified Data.Map.Strict as M
 import Data.Foldable (for_)
 import Data.Version (showVersion)
 import qualified GHC.Foreign as GF
@@ -41,8 +42,8 @@ import qualified System.Process as P
 import Paths_vestigia (version)
 import Vestigia.Diff
   (Dump(..), Kind(..), Named(..), Run(..), diffDesigned, divergenceJson,
-   divergenceSummary, dvOrigins, inObject, inOffset, layoutApart,
-   readDump, restrictTo, runApart)
+   divergenceSummary, dvCallers, dvOrigins, inObject, inOffset, inPc,
+   layoutApart, readDump, restrictTo, runApart)
 import Vestigia.Json (encode)
 import Vestigia.Layout (fixLayout)
 import Vestigia.Memcheck (Memcheck, readMemcheck)
@@ -423,9 +424,13 @@ diff o paths = do
     [] -> pure ()
   let dv = restrictTo (oObjects o)
         (diffDesigned controls dumps designed)
-  places <- symbolize addr2line
+  places <- symbolize addr2line $
     [ (obj, inOffset i) | (_, i) <- dvOrigins dv
                         , Just obj <- [ inObject i ] ]
+    -- the calls that reached each origin
+    <> [ (obj, a) | (_, i) <- dvOrigins dv
+                  , Just (stacks, _) <- [ M.lookup (inPc i) (dvCallers dv) ]
+                  , calls <- stacks, (Just obj, a) <- calls ]
   let doc = encode (divergenceJson (T.pack (showVersion version))
         (fmap snd named) places dv)
   maybe (TIO.putStr doc) (\p -> TIO.writeFile p doc) (oOut o)

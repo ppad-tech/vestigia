@@ -299,6 +299,30 @@ diffTests = testGroup "diff"
       -- a control dividing other operands sets it apart as unsteady
       fmap inPc (dvUnsteady (diffControlled [ x ] [ a, b ])) @?= [ 0x40 ]
 
+  , testCase "an origin is given the calls that reached it" $ do
+      -- 0x10 ran in context 2 (the call at 0x40 made in context 1,
+      -- the call at 0x30 made in the program's own) in A, and in the
+      -- program's own context too in B
+      let calls = T.unlines
+            [ "C 1 0 30", "C 2 1 40" ]
+      a <- either assertFailure pure (readDump (dumpA <> calls
+        <> "K 10 0 2\n"))
+      b <- either assertFailure pure (readDump (dumpB <> calls
+        <> "K 10 1 2 0\n"))
+      callsOf a 2 @?= [ (Just "/lib.so", 0x40), (Just "/lib.so", 0x30) ]
+      callsOf a 0 @?= []
+      M.lookup 0x10 (dvCallers (diffDumps [ a, b ]))
+        @?= Just ([ [ (Just "/lib.so", 0x40), (Just "/lib.so", 0x30) ]
+                  , [] ], True)
+      M.lookup 0x10 (dvCallers (diffDumps [ a, a ]))
+        @?= Nothing
+
+  , testCase "contexts that do not chain back are refused" $ do
+      isLeft (readDump (dumpA <> "C 1 2 30\nC 2 1 40\n"))
+        @? "a context made in a later one"
+      isLeft (readDump (dumpA <> "K 10 0 5\n"))
+        @? "a context never made"
+
   , testCase "identical runs have no origins" $ do
       a <- either assertFailure pure (readDump dumpA)
       let dv = diffDumps [ a, a ]

@@ -20,8 +20,9 @@
       origin with the runs alike there and the runs that never
       reached it, a branch taking its outcomes in another order an
       origin too, a return never one, an integer division on other
-      operands an `operand` origin, and what ran downstream listed
-      per object), set against controls repeating a secret, with
+      operands an `operand` origin, each origin with the calls that
+      reached it, and what ran downstream listed per object), set
+      against controls repeating a secret, with
       what every run executed in each object, and runs designed to
       reach particular paths compared for control and coverage alone
       (`--designed`);
