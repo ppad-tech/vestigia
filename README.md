@@ -6,8 +6,8 @@ A Haskell tool that finds where a program's execution depended on a
 secret, by running it.
 
 vestigia executes a harness, reports every instruction that branched
-on the secret or computed an address from it, and names each by
-function and source line.
+on the secret, computed an address from it, or divided by or into
+it, and names each by function and source line.
 
 A clean report is not a proof of constant-time execution. It
 covers only the paths the harness drove, and the discipline
@@ -39,8 +39,9 @@ can time the same harness. A run that marks nothing is refused.
 ### Taint: `vestigia run`
 
 `run` executes the harness under valgrind's memcheck with the marked
-bytes undefined, and reports every branch and address that descends
-from them:
+bytes undefined, and reports every branch, address, and integer
+division operand that descends from them (memcheck reports the last
+through vestigia's patch, `nix/memcheck-operand.patch`):
 
 ```
 $ vestigia run --out trace.json -- ./harness public_key 4
@@ -48,18 +49,23 @@ control  0x4875cd2  MontConfig::from_bigint      montgomery_backend.rs:359  x8
 control  0x4875cf9  cmp<4>                       mod.rs:565  x4
 ...
 control  0x4878d4d  next<&[u64]>                 bits.rs:32  x982
-12 secret-dependent site(s); 0 unrelated; 0 fault(s)
+12 secret-dependent site(s) over 1 run(s); 0 unrelated; 0 fault(s)
 ```
 
-`vestigia read FILE.xml` reports on a memcheck run made elsewhere.
+memcheck sees only the path a run takes, so trace a harness on
+several secrets: `run --dir DIR` keeps a run (memcheck's XML, where
+the harness's objects loaded, its exit status), and `vestigia read
+DIR...` reports on such runs as one, each site with the runs that
+reached it. `read` takes a memcheck XML file made elsewhere too.
 `--object TEXT` keeps the sites in objects whose path contains TEXT.
 
 ### Differential traces: `vestigia record` and `vestigia diff`
 
 `record` runs the harness under QEMU with a plugin that summarises,
-per instruction, how often it ran, where it branched, and which
-addresses it touched. Record several runs differing only in the
-secret, and `diff` reports where they diverge:
+per instruction, how often it ran, where it branched, which addresses
+it touched, and, for an integer division, which operands it divided.
+Record several runs differing only in the secret, and `diff` reports
+where they diverge:
 
 ```
 $ for s in 1 2 3; do
@@ -68,23 +74,28 @@ $ for s in 1 2 3; do
 $ vestigia record --dump control -- ./harness public_key 2 1
 $ vestigia diff --object libpenumbra_audit --control control \
 >   --out diff.json run-*
-control  0xe9d6   Element::vartime_compress_to_field  sign.rs:11      ...
-address  0x152c8  Fq::sqrt_ratio_zeta                 invsqrt.rs:113  ...
+control  0xe9d6   abs<Fq>              sign.rs:11      ...
+address  0x152c8  Fq::sqrt_ratio_zeta  invsqrt.rs:113  ...
 ...
-44 origin(s) over 3 run(s); 1383 instruction(s) downstream; 0 unsteady ...
+40 origin(s) over 3 run(s); 1387 instruction(s) downstream; 0 unsteady ...
 ```
 
 An *origin* is a branch whose outcomes differ between runs, in
-proportion or in order, or an instruction whose addresses differ.
-Each names the runs that behaved alike there. Instructions that
-merely ran a different number of times are listed as downstream, and
-every instruction some run executed is listed as coverage.
+proportion or in order (`control`), an instruction whose addresses
+differ (`address`), or a division, whose time depends on its
+operands, on other operands (`operand`). Each names the runs that
+behaved alike there, and the calls that reached it, which the plugin
+keeps as a shadow stack, as memcheck gives a site its callers.
+Instructions that merely ran a different number of times are listed
+as downstream, as are returns whose targets differ, which go where
+their calls sent them; and every instruction some run executed is
+listed as coverage.
 
 * `--control DUMP` repeats the first run's secret; whatever differs
   between the two is *unsteady* and kept out of the origins.
 * `--designed DUMP` is a run whose secret was chosen to reach a
   particular path. It counts toward control origins and coverage,
-  never toward address origins.
+  never toward address or operand origins.
 * `--object TEXT` keeps the report to matching objects.
 
 `record` disables address-space randomisation and seeds the guest's
@@ -96,13 +107,22 @@ arena, large blocks from the heap), and `diff` refuses runs that
 loaded an object at different addresses. A guest reading
 `/dev/urandom` still reads the host's.
 
+`record` appends to its dump how the run was made: the program and
+its arguments, the size of the guest's environment, and the exit
+status, which the report gives for each run. `diff` refuses a run of
+another program, or with arguments of another number or length, or an
+environment of another size, than the first run's, each of which lays
+the guest's stack out apart; and a control that does not repeat the
+first run's arguments.
+
 ### As derivations
 
 The flake's `lib.<system>` holds `traceOf` and `diffOf`, which run
-either instrument as a derivation; an `x86_64-linux` run executes on
-any builder for that system, and its report is cached. `diffOf`
-repeats the first run as its control. `nix/lib.nix` holds the same
-for a consumer's own nixpkgs, beside `version`.
+either instrument as a derivation over a list of runs; an
+`x86_64-linux` run executes on any builder for that system, and its
+report is cached. `diffOf` repeats the first run as its control.
+`nix/lib.nix` holds the same for a consumer's own nixpkgs, beside
+`version`.
 
 ```nix
 vestigia.lib.x86_64-linux.diffOf {
@@ -113,8 +133,8 @@ vestigia.lib.x86_64-linux.diffOf {
 }
 ```
 
-The output holds `trace.json` (`vestigia/trace-v1`) or `diff.json`
-(`vestigia/diff-v2`), the raw memcheck XML or plugin dumps, what the
+The output holds `trace.json` (`vestigia/trace-v2`) or `diff.json`
+(`vestigia/diff-v3`), the runs kept or the plugin's dumps, what the
 harness printed, and the wall time.
 
 ## Two instruments
@@ -135,23 +155,36 @@ ppad-poly1305, and ppad-secp256k1.
 * What a function is meant to reveal (a comparison's result, a
   public key) must be marked public, or it is reported.
 * valgrind and QEMU's user mode run on Linux; elsewhere vestigia only
-  reads their reports. QEMU traces other ISAs differentially, but
+  reads their reports. `record` runs an x86_64 or aarch64 harness on
+  either host, choosing QEMU by the program's ELF header, but
   memcheck needs a native host.
-* The plugin assumes a single-threaded guest, and runs compared by
-  `diff` must differ only in the secret, argument lengths included.
+* The plugin records one guest thread: a guest that starts a second
+  is stopped, and its dump refused. Runs compared by `diff` must
+  differ only in the secret; it checks their arguments and
+  environments, not what the harness reads beyond them.
+* An address origin can be an address that an earlier secret branch
+  moved, a heap block or stack frame laid out apart, rather than one
+  computed from the secret.
+* Divisions alone are read for their operands. Floating-point
+  division and square root, and multiplication on cores that time it
+  by its operands, are left to a timing instrument.
 * A GHC harness wants `-with-rtsopts=-xr1G -V0`, against the
-  runtime's terabyte reservation and its interval timer.
-* Source lines need line tables, and sites assume an object's file
-  offsets are its virtual addresses, as GNU ld and lld emit them.
+  runtime's terabyte reservation and its interval timer. GHC calls
+  and returns by jumping, so its origins have no callers, and a
+  return to a continuation is not known as a return.
+* Source lines need line tables.
 
 ## Development
 
 You'll require [Nix][nixos] with [flake][flake] support enabled.
 Enter a development shell with `nix develop`, then `cabal build` and
-`cabal test`. The spikes under `etc/spike` run on an `x86_64-linux`
-builder:
+`cabal test`. The probe check runs `etc/probe/harness.c` under both
+instruments, and the same harness built for aarch64 differentially,
+holding each report to what the harness does; it and the spikes under
+`etc/spike` run on an `x86_64-linux` builder:
 
 ```
+$ nix build .#checks.x86_64-linux.probe
 $ nix build --impure -f etc/spike/penumbra traces
 ```
 

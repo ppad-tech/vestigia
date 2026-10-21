@@ -16,24 +16,24 @@ let
   });
 
   # memcheck runs on Linux only; elsewhere the command can still
-  # read a run's XML
+  # read a run's XML. It reports an integer division's undefined
+  # operands (memcheck-operand.patch)
   linux = pkgs.stdenv.hostPlatform.isLinux;
-  valgrind = pkgs.valgrind;
+  valgrind = pkgs.valgrind.overrideAttrs (o: {
+    patches = (o.patches or [ ]) ++ [ ./memcheck-operand.patch ];
+  });
 
   # the QEMU plugin recording a run's leakage trace per
-  # instruction, and the QEMU that runs a harness of this
-  # system's ISA under it: user mode alone, its guest's getrandom
-  # drawn from the generator -seed fixes (qemu-getrandom.patch)
+  # instruction, and the QEMU that runs a harness under it, for
+  # either ISA, whatever the host's: user mode alone, its guest's
+  # getrandom drawn from the generator -seed fixes
+  # (qemu-getrandom.patch)
   qemu = (pkgs.qemu.override {
     userOnly = true;
     hostCpuTargets = [ "x86_64-linux-user" "aarch64-linux-user" ];
   }).overrideAttrs (o: {
     patches = (o.patches or [ ]) ++ [ ./qemu-getrandom.patch ];
   });
-  qemuFor = {
-    x86_64 = "${qemu}/bin/qemu-x86_64";
-    aarch64 = "${qemu}/bin/qemu-aarch64";
-  };
   plugin = pkgs.runCommandCC "vestigia-qemu-plugin" {
     nativeBuildInputs = [ pkgs.pkg-config ];
     buildInputs = [ pkgs.glib ];
@@ -43,9 +43,6 @@ let
       $(pkg-config --cflags glib-2.0) -I${qemu}/include \
       -o $out/lib/libvestigia-qemu.so ${src}/plugin/vestigia-qemu.c
   '';
-  isa = builtins.head
-    (lib.splitString "-" pkgs.stdenv.hostPlatform.system);
-
   # the harness-side header; a harness build also needs
   # valgrind's own (valgrindDev)
   include = pkgs.runCommand "vestigia-include" { } ''
@@ -54,7 +51,9 @@ let
     cp ${src}/include/vestigia.c $out/include/vestigia.c
   '';
 
-  # the command, with the valgrind it was built against baked in
+  # the command, with the valgrind it was built against baked in,
+  # and LLVM's addr2line, which reads either ISA's objects and names
+  # inlined frames by their own functions (Vestigia.Symbol)
   vestigia = pkgs.runCommand "vestigia" {
     nativeBuildInputs = [ pkgs.makeWrapper ];
   } ''
@@ -62,37 +61,46 @@ let
     makeWrapper ${hpkgs.vestigia}/bin/vestigia $out/bin/vestigia \
       ${lib.optionalString linux (lib.concatStringsSep " " [
         "--set-default VESTIGIA_VALGRIND ${valgrind}/bin/valgrind"
-        "--set-default VESTIGIA_QEMU ${qemuFor.${isa}}"
+        "--set-default VESTIGIA_QEMU_X86_64 ${qemu}/bin/qemu-x86_64"
+        "--set-default VESTIGIA_QEMU_AARCH64 ${qemu}/bin/qemu-aarch64"
         "--set-default VESTIGIA_PLUGIN"
         "${plugin}/lib/libvestigia-qemu.so"
         "--set-default VESTIGIA_ADDR2LINE"
-        "${pkgs.binutils-unwrapped}/bin/addr2line"
+        "${pkgs.llvm}/bin/llvm-addr2line"
       ])}
     ln -s ${include}/include $out/include
   '';
 
-  # one harness run under memcheck, as a derivation: its report,
-  # memcheck's XML, and what the harness printed. `objects` keeps
-  # sites in objects whose path contains one of them. A harness that
-  # fails still leaves a report of what ran; a run vestigia could
-  # not read fails the build.
-  traceOf = { name, harness, args ? [ ], objects ? [ ] }:
+  # runs of one harness under memcheck, as a derivation: each run
+  # kept (run-K: memcheck's XML, the objects its harness reported,
+  # its exit status, its own report), what each printed, and the
+  # report over all of them. `runs` is a list of argument lists, the
+  # secrets of the trace; memcheck sees only the path a run takes, so
+  # each run adds the sites on its own. `objects` keeps sites in
+  # objects whose path contains one of them. A harness that fails
+  # still leaves a report of what ran; a run vestigia could not read
+  # fails the build.
+  traceOf = { name, harness, runs, objects ? [ ] }:
     pkgs.runCommand "vestigia-trace-${name}" { } ''
       mkdir -p $out
       start=$(date +%s%N)
-      set +e
-      ${vestigia}/bin/vestigia run \
-        --xml $out/memcheck.xml --out $out/trace.json \
+      ${lib.concatImapStrings (k: args: ''
+        set +e
+        ${vestigia}/bin/vestigia run --dir $out/run-${toString k} \
+          --out $out/run-${toString k}/trace.json \
+          -- ${harness} ${lib.escapeShellArgs args} \
+          > $out/stdout-${toString k} 2> $out/stderr-${toString k}
+        echo $? > $out/status-${toString k}
+        set -e
+      '') runs}
+      ${vestigia}/bin/vestigia read --out $out/trace.json \
         ${lib.concatMapStrings (o: "--object ${lib.escapeShellArg o} ")
-          objects}-- ${harness} ${lib.escapeShellArgs args} \
-        > $out/stdout 2> $out/stderr
-      echo $? > $out/status
-      set -e
-      echo $(( ($(date +%s%N) - start) / 1000000 )) > $out/milliseconds
-      test -s $out/trace.json || {
-        cat $out/stderr >&2
+          objects}${lib.concatImapStrings (k: _:
+          "$out/run-${toString k} ") runs} 2> $out/summary || {
+        cat $out/summary >&2
         exit 1
       }
+      echo $(( ($(date +%s%N) - start) / 1000000 )) > $out/milliseconds
     '';
 
   # runs of one harness that differ only in a secret, each

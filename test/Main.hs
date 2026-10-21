@@ -79,21 +79,19 @@ memcheckTests = testGroup "memcheck"
 traceTests :: TestTree
 traceTests = testGroup "trace"
   [ testCase "the probe's secret addresses are its sites" $ do
-      tr <- trace <$> fixture "probe.xml"
-      fmap (\s -> (siClass s, frFn (siFrame s), frLine (siFrame s)))
-          (trSites tr)
+      tr <- one <$> fixture "probe.xml"
+      fmap (\s -> (siClass s, frFn (at s), frLine (at s))) (trSites tr)
         @?= [ (Address, Just "lookup", Just 16)
             , (Address, Just "main", Just 33) ]
       trUnrelated tr @?= []
       trFaults tr @?= []
 
   , testCase "only a secret's descendants are sites" $ do
-      tr <- trace <$> either assertFailure pure (readMemcheck mixed)
-      fmap (\s -> (siClass s, frIp (siFrame s), siCount s))
-          (trSites tr)
+      tr <- one <$> either assertFailure pure (readMemcheck mixed)
+      fmap (\s -> (siClass s, frIp (at s), siCount s)) (trSites tr)
         @?= [ (Control, 0x10, 5) ]
-      fmap meKind (trUnrelated tr) @?= [ "UninitValue" ]
-      fmap meKind (trFaults tr) @?= [ "InvalidRead" ]
+      fmap (meKind . snd) (trUnrelated tr) @?= [ "UninitValue" ]
+      fmap (meKind . snd) (trFaults tr) @?= [ "InvalidRead" ]
 
   , testCase "a frame is named by its address in its object" $ do
       os <- either assertFailure pure
@@ -109,16 +107,39 @@ traceTests = testGroup "trace"
       objectOffset os (f "/lib/libc.so.6" 0x7000) @?= Nothing
 
   , testCase "a site is kept to the objects named" $ do
-      tr <- trace <$> fixture "probe.xml"
+      tr <- one <$> fixture "probe.xml"
       length (trSites (sitesIn [ "probe" ] tr)) @?= 2
       trSites (sitesIn [ "libc" ] tr) @?= []
       length (trSites (sitesIn [] tr)) @?= 2
 
   , testCase "one site per instruction, whatever called it" $ do
-      tr <- trace <$> either assertFailure pure (readMemcheck twoCallers)
-      fmap (\s -> (frIp (siFrame s), siCount s, length (siStacks s)))
+      tr <- one <$> either assertFailure pure (readMemcheck twoCallers)
+      fmap (\s -> (frIp (at s), siCount s, length (siStacks s)))
           (trSites tr)
         @?= [ (0x10, 7, 2) ]
+
+  , testCase "runs' sites are one per instruction, with their runs" $ do
+      a <- either assertFailure pure (readMemcheck mixed)
+      b <- either assertFailure pure (readMemcheck twoCallers)
+      -- the same object loaded 0x100 higher in the second run: its
+      -- branch at 0x110 is the first run's at 0x10
+      let obj = "/lib.so"
+          inObj mc = mc { mcErrors =
+            [ e { meStack = [ f { frObj = Just obj }
+                            | f <- meStack e ] }
+            | e <- mcErrors mc ] }
+          moved mc = mc { mcErrors =
+            [ e { meStack = [ f { frIp = frIp f + 0x100 }
+                            | f <- meStack e ] }
+            | e <- mcErrors mc ] }
+          tr = trace
+            [ Taint "a" (inObj a) [ (0, obj) ] (Just 0)
+            , Taint "b" (moved (inObj b)) [ (0x100, obj) ] (Just 1) ]
+      fmap (\s -> (siClass s, lcOffset (siAt s), siCount s, siRuns s
+                  , length (siStacks s)))
+          (trSites tr)
+        @?= [ (Control, Just 0x10, 5 + 7, [ 0, 1 ], 1 + 2) ]
+      fmap fst (trUnrelated tr) @?= [ 0 ]
   ]
 
 diffTests :: TestTree
@@ -245,6 +266,63 @@ diffTests = testGroup "diff"
       -- in the same order, nothing
       dvOrigins (diffDumps [ a, a ]) @?= []
 
+  , testCase "a return goes where its call sent it: downstream" $ do
+      -- 0x50 returns four times in each run, to 0x30 twice in A and
+      -- three times in B, as the branch at 0x10 sent it
+      a <- either assertFailure pure (readDump (dumpA <> T.unlines
+        [ "I 50 4 0 aaaa 0 /lib.so 50", "R 50", "E 50 30 2"
+        , "E 50 60 2" ]))
+      b <- either assertFailure pure (readDump (dumpB <> T.unlines
+        [ "I 50 4 0 aaaa 0 /lib.so 50", "R 50", "E 50 30 3"
+        , "E 50 60 1" ]))
+      let dv = diffDumps [ a, b ]
+      fmap (\(o, i) -> (o, inPc i)) (dvOrigins dv)
+        @?= [ (ControlOrigin, 0x10), (AddressOrigin, 0x20) ]
+      fmap inPc (dvDownstream dv) @?= [ 0x30, 0x50 ]
+
+  , testCase "a division on other operands is an operand origin" $ do
+      -- 0x40 divides once in every run, on other operands in B; in a
+      -- designed run, on others again
+      a <- either assertFailure pure (readDump (dumpA <> "D 40 1111\n"))
+      b <- either assertFailure pure (readDump (dumpB <> "D 40 2222\n"))
+      x <- either assertFailure pure (readDump (dumpA <> "D 40 3333\n"))
+      let dv = diffDumps [ a, b ]
+      fmap (\(o, i) -> (o, inPc i)) (dvOrigins dv)
+        @?= [ (ControlOrigin, 0x10), (AddressOrigin, 0x20)
+            , (OperandOrigin, 0x40) ]
+      M.lookup (OperandOrigin, 0x40) (dvBehaviour (diffDumps [ a, b, a ]))
+        @?= Just ([ [ 0, 2 ], [ 1 ] ], [])
+      notElem 0x40 (fmap inPc (dvDownstream dv)) @? "downstream"
+      -- a designed run's operands say nothing of the secret
+      fmap (\(o, i) -> (o, inPc i)) (dvOrigins (diffDesigned [] [ a, a ]
+        [ x ])) @?= []
+      -- a control dividing other operands sets it apart as unsteady
+      fmap inPc (dvUnsteady (diffControlled [ x ] [ a, b ])) @?= [ 0x40 ]
+
+  , testCase "an origin is given the calls that reached it" $ do
+      -- 0x10 ran in context 2 (the call at 0x40 made in context 1,
+      -- the call at 0x30 made in the program's own) in A, and in the
+      -- program's own context too in B
+      let calls = T.unlines
+            [ "C 1 0 30", "C 2 1 40" ]
+      a <- either assertFailure pure (readDump (dumpA <> calls
+        <> "K 10 0 2\n"))
+      b <- either assertFailure pure (readDump (dumpB <> calls
+        <> "K 10 1 2 0\n"))
+      callsOf a 2 @?= [ (Just "/lib.so", 0x40), (Just "/lib.so", 0x30) ]
+      callsOf a 0 @?= []
+      M.lookup 0x10 (dvCallers (diffDumps [ a, b ]))
+        @?= Just ([ [ (Just "/lib.so", 0x40), (Just "/lib.so", 0x30) ]
+                  , [] ], True)
+      M.lookup 0x10 (dvCallers (diffDumps [ a, a ]))
+        @?= Nothing
+
+  , testCase "contexts that do not chain back are refused" $ do
+      isLeft (readDump (dumpA <> "C 1 2 30\nC 2 1 40\n"))
+        @? "a context made in a later one"
+      isLeft (readDump (dumpA <> "K 10 0 5\n"))
+        @? "a context never made"
+
   , testCase "identical runs have no origins" $ do
       a <- either assertFailure pure (readDump dumpA)
       let dv = diffDumps [ a, a ]
@@ -270,6 +348,34 @@ diffTests = testGroup "diff"
 
   , testCase "an unreadable line is refused" $
       isLeft (readDump "I 10 zz 0 f 0 /lib.so 0\n") @? "accepted"
+
+  , testCase "a guest stopped for a second thread is refused" $
+      isLeft (readDump "T 2\n") @? "accepted"
+
+  , testCase "a run's record reads whole" $ do
+      d <- either assertFailure pure (readDump (dumpA <> T.unlines
+        [ "A 2f62696e2f70", "A", "A 3035", "N 2 1a", "X -9" ]))
+      dpRun d @?= Just (Run [ "/bin/p", "", "05" ] (2, 0x1a) (-9))
+      fmap dpRun (readDump dumpA) @?= Right Nothing
+
+  , testCase "an incomplete record is refused" $ do
+      isLeft (readDump (dumpA <> "A 3035\nN 2 1a\n")) @? "no status"
+      isLeft (readDump (dumpA <> "N 2 1a\nX 0\n")) @? "no arguments"
+      isLeft (readDump (dumpA <> "A 305\nN 2 1a\nX 0\n"))
+        @? "half a byte"
+
+  , testCase "runs made apart are told apart" $ do
+      let r = Run [ "/bin/p", "05" ] (2, 0x1a) 0
+      runApart r r { rnArguments = [ "/bin/p", "3a" ], rnStatus = 1 }
+        @?= Nothing
+      isJust (runApart r r { rnArguments = [ "/bin/q", "05" ] })
+        @? "another program"
+      isJust (runApart r r { rnArguments = [ "/bin/p", "005" ] })
+        @? "a longer argument"
+      isJust (runApart r r { rnArguments = [ "/bin/p", "05", "x" ] })
+        @? "another argument"
+      isJust (runApart r r { rnEnvironment = (2, 0x1b) })
+        @? "a larger environment"
   ]
   where
     -- 0x10 is a branch run four times, taken twice in A and three
@@ -304,6 +410,19 @@ symbolTests = testGroup "symbol"
         @?= [ (0x1234, [ Place (Just "inner") (Just "/src/a.rs") (Just 12)
                        , Place (Just "outer") (Just "/src/b.rs") (Just 40) ])
             , (0x5678, [ Place Nothing Nothing Nothing ]) ]
+
+  , testCase "a legacy Rust name's escapes and hash undone" $ do
+      rustLegacy "decaf377::ark_curve::encoding::_$LT$impl$u20$decaf377\
+                 \..ark_curve..element..projective..Element$GT$::vartime\
+                 \_compress_to_field::h346fee1681a4f34f"
+        @?= "decaf377::ark_curve::encoding::<impl decaf377::ark_curve::\
+            \element::projective::Element>::vartime_compress_to_field"
+      rustLegacy "_$LT$$RF$T$u20$as$u20$core..fmt..Debug$GT$::fmt::\
+                 \h0123456789abcdef"
+        @?= "<&T as core::fmt::Debug>::fmt"
+      -- a C++ name, or one without a hash, is left as it is
+      rustLegacy "std::vector<int>::size" @?= "std::vector<int>::size"
+      rustLegacy "a::b$LT$c" @?= "a::b$LT$c"
   ]
 
 jsonTests :: TestTree
@@ -314,6 +433,14 @@ jsonTests = testGroup "json"
         @?= "{\n  \"b\": 1,\n  \"a\": \"q\\\"\\n\\u0001\"\n}\n"
   ]
 
+-- a trace of one run, of which memcheck's report is all that is
+-- known
+one :: Memcheck -> Trace
+one mc = trace [ Taint "run" mc [] Nothing ]
+
+at :: Site -> Frame
+at = lcFrame . siAt
+
 fixture :: FilePath -> IO Memcheck
 fixture f = do
   b <- BS.readFile ("test/fixtures/" <> f)
@@ -323,6 +450,11 @@ isLeft :: Either a b -> Bool
 isLeft e = case e of
   Left _ -> True
   Right _ -> False
+
+isJust :: Maybe a -> Bool
+isJust m = case m of
+  Just _ -> True
+  Nothing -> False
 
 -- a secret branch, an uninitialised heap read, a bad read, and a
 -- leak report

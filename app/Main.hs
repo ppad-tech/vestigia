@@ -16,34 +16,44 @@ module Main (
 import Control.Exception (IOException, try)
 import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
+import Data.Char (toUpper)
+import qualified Data.Map.Strict as M
+import Data.Foldable (for_)
 import Data.Version (showVersion)
+import qualified GHC.Foreign as GF
+import GHC.IO.Encoding (getFileSystemEncoding)
 import Numeric (showHex)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
 import qualified Data.Text.IO as TIO
-import System.Directory (getTemporaryDirectory, removeFile)
+import System.Directory
+  (createDirectoryIfMissing, doesDirectoryExist, doesFileExist,
+   getTemporaryDirectory, removeFile)
 import System.Environment (getArgs, getEnvironment, lookupEnv)
 import System.Exit (ExitCode(..), exitWith)
-import System.FilePath (takeFileName)
-import System.IO (hClose, hPutStrLn, openTempFile, stderr)
+import System.FilePath (takeFileName, (</>))
+import Text.Read (readMaybe)
+import System.IO
+  (IOMode(..), hClose, hPutStrLn, openTempFile, stderr, withBinaryFile)
 import System.Process (proc, waitForProcess, withCreateProcess)
 import qualified System.Process as P
 
 import Paths_vestigia (version)
 import Vestigia.Diff
-  (diffDesigned, divergenceJson, divergenceSummary, dvOrigins,
-   inObject, inOffset, layoutApart, readDump, restrictTo)
+  (Dump(..), Kind(..), Named(..), Run(..), diffDesigned, divergenceJson,
+   divergenceSummary, dvCallers, dvOrigins, inObject, inOffset, inPc,
+   layoutApart, readDump, restrictTo, runApart)
 import Vestigia.Json (encode)
 import Vestigia.Layout (fixLayout)
-import Vestigia.Memcheck (readMemcheck)
+import Vestigia.Memcheck (Memcheck, readMemcheck)
 import Vestigia.Symbol (symbolize)
 import Vestigia.Trace
-  (readObjects, sitesIn, trace, traceJson, traceSummary, withObjects)
+  (Taint(..), readObjects, sitesIn, trace, traceJson, traceSummary)
 
 data Opts = Opts {
     oValgrind :: !(Maybe FilePath)
-  , oXml :: !(Maybe FilePath)
+  , oDir :: !(Maybe FilePath)
   , oOut :: !(Maybe FilePath)
   , oQemu :: !(Maybe FilePath)
   , oPlugin :: !(Maybe FilePath)
@@ -63,8 +73,8 @@ main = do
       Right (_, []) -> usage "run: no program given"
       Left e -> usage e
     ("read" : rest) -> case options rest of
-      Right (o, [ xml ]) -> readXml o xml
-      Right _ -> usage "read: one XML file expected"
+      Right (o, runs@(_ : _)) -> readRuns o runs
+      Right _ -> usage "read: a run or memcheck XML file expected"
       Left e -> usage e
     ("record" : rest) -> case options rest of
       Right (o, prog : progArgs) -> record o prog progArgs
@@ -82,9 +92,9 @@ usage e = do
   hPutStrLn stderr ("vestigia: " <> e)
   hPutStrLn stderr $ unlines
     [ "usage:"
-    , "  vestigia run [--valgrind PATH] [--xml FILE] [--out FILE] \
+    , "  vestigia run [--valgrind PATH] [--dir DIR] [--out FILE] \
       \[--object TEXT]... -- PROGRAM [ARG...]"
-    , "  vestigia read [--out FILE] [--object TEXT]... FILE.xml"
+    , "  vestigia read [--out FILE] [--object TEXT]... RUN..."
     , "  vestigia record [--qemu PATH] [--plugin PATH] --dump FILE \
       \-- PROGRAM [ARG...]"
     , "  vestigia diff [--out FILE] [--addr2line PATH] \
@@ -92,20 +102,25 @@ usage e = do
       \DUMP DUMP..."
     , ""
     , "run executes PROGRAM under memcheck, which reports every"
-    , "branch and address that depended on bytes the program marked"
-    , "secret (vestigia.h), and writes the report (vestigia/trace-v1)."
+    , "branch, address, and division that depended on bytes the"
+    , "program marked secret (vestigia.h), and writes the report"
+    , "(vestigia/trace-v2); --dir keeps the run in DIR. read reports"
+    , "on runs kept so, or memcheck XML files made elsewhere, as one."
     , "valgrind is --valgrind, else $VESTIGIA_VALGRIND, else on PATH."
     , "--object keeps sites in objects whose path contains TEXT."
     , ""
     , "record executes PROGRAM under QEMU with vestigia's plugin and"
-    , "dumps its leakage trace per instruction; diff compares dumps"
-    , "of runs that differ only in a secret and reports where they"
-    , "diverge (vestigia/diff-v1), naming sources with addr2line."
+    , "dumps its leakage trace per instruction, with how it was run;"
+    , "diff compares dumps of runs that differ only in a secret and"
+    , "reports where they diverge (vestigia/diff-v3), naming sources"
+    , "with addr2line."
     , "--object keeps origins in objects whose path contains TEXT;"
     , "--control names a run repeating the first run's secret, and"
     , "what differs in it is unsteady, not an origin."
-    , "qemu, the plugin, and addr2line default to $VESTIGIA_QEMU,"
-    , "$VESTIGIA_PLUGIN, and $VESTIGIA_ADDR2LINE."
+    , "QEMU is the one for PROGRAM's architecture: --qemu, else"
+    , "$VESTIGIA_QEMU_X86_64 or $VESTIGIA_QEMU_AARCH64, else"
+    , "qemu-x86_64 or qemu-aarch64 on PATH. The plugin and addr2line"
+    , "default to $VESTIGIA_PLUGIN and $VESTIGIA_ADDR2LINE."
     ]
   exitWith (ExitFailure 2)
 
@@ -117,7 +132,7 @@ options = go (Opts Nothing Nothing Nothing Nothing Nothing Nothing
     go o xs = case xs of
       ("--" : rest) -> Right (o, rest)
       ("--valgrind" : p : rest) -> go o { oValgrind = Just p } rest
-      ("--xml" : p : rest) -> go o { oXml = Just p } rest
+      ("--dir" : p : rest) -> go o { oDir = Just p } rest
       ("--out" : p : rest) -> go o { oOut = Just p } rest
       ("--qemu" : p : rest) -> go o { oQemu = Just p } rest
       ("--plugin" : p : rest) -> go o { oPlugin = Just p } rest
@@ -134,8 +149,12 @@ options = go (Opts Nothing Nothing Nothing Nothing Nothing Nothing
 
 -- the settings every trace runs under: origins tracked so a
 -- secret's descendants are known as such, no limit on contexts,
--- the precise definedness checks optimised code needs, and no
--- leak report
+-- the precise definedness checks optimised code needs, every
+-- register (the instruction pointer among them) brought up to date
+-- at each instruction of a program's own code, so that a site that
+-- touches no memory, a division by a register, is named by its own
+-- address rather than the last memory access before it, and no leak
+-- report
 memcheckArgs :: FilePath -> [String]
 memcheckArgs xml =
   [ "--tool=memcheck"
@@ -145,26 +164,35 @@ memcheckArgs xml =
   , "--error-limit=no"
   , "--num-callers=24"
   , "--expensive-definedness-checks=yes"
+  , "--px-file-backed=allregs-at-each-insn"
   , "--leak-check=no"
   , "--child-silent-after-fork=yes"
   ]
+
+-- a run kept in a directory (run --dir): memcheck's XML, the objects
+-- the harness's first mark wrote (vestigia.h), and the harness's
+-- exit status
+runXml, runObjects, runExit :: FilePath -> FilePath
+runXml d = d </> "memcheck.xml"
+runObjects d = d </> "objects"
+runExit d = d </> "exit"
 
 run :: Opts -> FilePath -> [String] -> IO ()
 run o prog progArgs = do
   env <- lookupEnv "VESTIGIA_VALGRIND"
   let valgrind = maybe (maybe "valgrind" id env) id (oValgrind o)
-  (xml, temporary) <- case oXml o of
-    Just p -> pure (p, False)
+  (xml, objects) <- case oDir o of
+    Just d -> do
+      createDirectoryIfMissing True d
+      writeFile (runObjects d) ""
+      pure (runXml d, runObjects d)
     Nothing -> do
       tmp <- getTemporaryDirectory
       (p, h) <- openTempFile tmp "vestigia.xml"
       hClose h
-      pure (p, True)
-  -- where the harness's loader put its objects, which the
-  -- harness's first mark writes (vestigia.h)
-  tmp <- getTemporaryDirectory
-  (objects, oh) <- openTempFile tmp "vestigia-objects"
-  hClose oh
+      (q, oh) <- openTempFile tmp "vestigia-objects"
+      hClose oh
+      pure (p, q)
   environment <- getEnvironment
   r <- try (withCreateProcess
          (proc valgrind (memcheckArgs xml <> (prog : progArgs)))
@@ -178,44 +206,79 @@ run o prog progArgs = do
         <> show (e :: IOException))
       exitWith (ExitFailure 2)
     Right c -> pure c
-  otext <- TIO.readFile objects
-  os <- case readObjects otext of
+  t <- case oDir o of
+    Just d -> do
+      writeFile (runExit d) (show (exitStatus code) <> "\n")
+      readRun d
+    Nothing -> do
+      os <- markedObjects objects
+      mc <- readXml xml
+      removeFile objects
+      removeFile xml
+      pure (Taint "run" mc os (Just (exitStatus code)))
+  report o [ t ]
+
+exitStatus :: ExitCode -> Int
+exitStatus c = case c of
+  ExitSuccess -> 0
+  ExitFailure n -> n
+
+-- runs kept by run --dir, or memcheck XML files made elsewhere, of
+-- which nothing more is known
+readRuns :: Opts -> [FilePath] -> IO ()
+readRuns o paths = do
+  ts <- traverse (\p -> do
+      kept <- doesDirectoryExist p
+      if kept
+        then readRun p
+        else do
+          mc <- readXml p
+          pure (Taint (T.pack (takeFileName p)) mc [] Nothing))
+    paths
+  report o ts
+
+readRun :: FilePath -> IO Taint
+readRun d = do
+  os <- markedObjects (runObjects d)
+  mc <- readXml (runXml d)
+  known <- doesFileExist (runExit d)
+  exit <- if known
+    then fmap (readMaybe . takeWhile (/= '\n')) (readFile (runExit d))
+    else pure Nothing
+  pure (Taint (T.pack (takeFileName d)) mc os exit)
+
+-- the objects a run's harness reported where it marked its secret;
+-- none written, no secret marked: a run that found nothing because
+-- nothing was secret is no evidence, and is refused
+markedObjects :: FilePath -> IO [(Integer, T.Text)]
+markedObjects p = do
+  t <- TIO.readFile p
+  case readObjects t of
     Left e -> do
-      hPutStrLn stderr ("vestigia: " <> objects <> ": " <> e)
+      hPutStrLn stderr ("vestigia: " <> p <> ": " <> e)
       exitWith (ExitFailure 2)
-    Right v -> pure v
-  removeFile objects
-  -- no objects written, no secret marked: a run that found nothing
-  -- because nothing was secret is no evidence, and is refused
-  when (null os) $ do
-    hPutStrLn stderr "vestigia: the harness marked no secret \
-      \(vestigia_secret was never called on any bytes); its run \
-      \says nothing"
-    exitWith (ExitFailure 2)
-  report o (Just (exitCode code)) os xml
-  if temporary then removeFile xml else pure ()
-  where
-    exitCode c = case c of
-      ExitSuccess -> 0
-      ExitFailure n -> n
+    Right [] -> do
+      hPutStrLn stderr ("vestigia: " <> p <> ": the harness marked \
+        \no secret (vestigia_secret was never called on any bytes); \
+        \its run says nothing")
+      exitWith (ExitFailure 2)
+    Right os -> pure os
 
-readXml :: Opts -> FilePath -> IO ()
-readXml o xml = report o Nothing [] xml
-
-report :: Opts -> Maybe Int -> [(Integer, T.Text)] -> FilePath -> IO ()
-report o exit os xml = do
+readXml :: FilePath -> IO Memcheck
+readXml xml = do
   bytes <- BS.readFile xml
-  let txt = TE.decodeUtf8With TEE.lenientDecode bytes
-  case readMemcheck txt of
+  case readMemcheck (TE.decodeUtf8With TEE.lenientDecode bytes) of
     Left e -> do
       hPutStrLn stderr ("vestigia: " <> xml <> ": " <> e)
       exitWith (ExitFailure 2)
-    Right mc -> do
-      let tr = sitesIn (oObjects o) (withObjects os (trace mc))
-          doc = encode
-            (traceJson (T.pack (showVersion version)) exit tr)
-      maybe (TIO.putStr doc) (\p -> TIO.writeFile p doc) (oOut o)
-      TIO.hPutStr stderr (traceSummary tr)
+    Right mc -> pure mc
+
+report :: Opts -> [Taint] -> IO ()
+report o ts = do
+  let tr = sitesIn (oObjects o) (trace ts)
+      doc = encode (traceJson (T.pack (showVersion version)) tr)
+  maybe (TIO.putStr doc) (\p -> TIO.writeFile p doc) (oOut o)
+  TIO.hPutStr stderr (traceSummary tr)
 
 -- a tool named by its option, else its environment variable, else
 -- the given default
@@ -235,7 +298,10 @@ record o prog progArgs = do
     hPutStrLn stderr "vestigia: address randomisation could not be \
       \turned off; runs would differ in layout, and so everywhere"
     exitWith (ExitFailure 2)
-  qemu <- tool (oQemu o) "VESTIGIA_QEMU" "qemu-x86_64"
+  -- QEMU's user mode runs the programs of one architecture
+  isa <- machineOf prog
+  qemu <- tool (oQemu o) ("VESTIGIA_QEMU_" <> fmap toUpper isa)
+    ("qemu-" <> isa)
   plugin <- tool (oPlugin o) "VESTIGIA_PLUGIN" "libvestigia-qemu.so"
   -- QEMU maps the guest's libraries and heap in its own address
   -- space, wherever its own allocations leave room, and those vary
@@ -249,22 +315,67 @@ record o prog progArgs = do
   let tunables = "GLIBC_TUNABLES"
       host = "glibc.malloc.arena_max=1:glibc.malloc.mmap_threshold="
         <> "33554432"
+      own = lookup tunables environment
       guest = maybe [ "-U", tunables ]
-        (\v -> [ "-E", tunables <> "=" <> v ]) (lookup tunables environment)
+        (\v -> [ "-E", tunables <> "=" <> v ]) own
+      others = filter ((/= tunables) . fst) environment
   r <- try (withCreateProcess
          ((proc qemu (guest
                      <> [ "-seed", "0"
                         , "-plugin", plugin <> ",out=" <> dump, prog ]
                      <> progArgs))
-            { P.env = Just ((tunables, host)
-                : filter ((/= tunables) . fst) environment) })
+            { P.env = Just ((tunables, host) : others) })
          (\_ _ _ ph -> waitForProcess ph))
   case r of
     Left e -> do
       hPutStrLn stderr ("vestigia: cannot run " <> qemu <> ": "
         <> show (e :: IOException))
       exitWith (ExitFailure 2)
-    Right c -> exitWith c
+    Right c -> do
+      -- how the run was made, by which diff tells runs that differ
+      -- in the secret alone from runs laid out apart: the guest's
+      -- environment is QEMU's, with its own tunables restored
+      appendRun dump (prog : progArgs)
+        (others <> [ (tunables, v) | Just v <- [ own ] ]) c
+      exitWith c
+
+-- the architecture an ELF program is built for, as QEMU names its
+-- user-mode emulators: the header's machine, at byte 18
+machineOf :: FilePath -> IO String
+machineOf prog = do
+  r <- try (withBinaryFile prog ReadMode (\h -> BS.hGet h 20))
+  case fmap BS.unpack r of
+    Right (0x7f : 0x45 : 0x4c : 0x46 : _ : 1 : rest)
+      | [ 0x3e, 0 ] <- drop 12 rest -> pure "x86_64"
+      | [ 0xb7, 0 ] <- drop 12 rest -> pure "aarch64"
+    Right _ -> unknown "not an x86_64 or aarch64 ELF program"
+    Left e -> unknown (show (e :: IOException))
+  where
+    unknown why = do
+      hPutStrLn stderr ("vestigia: " <> prog <> ": " <> why
+        <> "; QEMU's user mode runs one")
+      exitWith (ExitFailure 2)
+
+-- append a run's record to its dump (Vestigia.Diff.readDump): its
+-- arguments' bytes, its environment's variables and the bytes they
+-- take, and its exit status
+appendRun :: FilePath -> [String] -> [(String, String)] -> ExitCode
+          -> IO ()
+appendRun dump args env code = do
+  enc <- getFileSystemEncoding
+  let bytes s = GF.withCStringLen enc s BS.packCStringLen
+  as <- traverse bytes args
+  es <- traverse (\(k, v) -> bytes (k <> "=" <> v)) env
+  appendFile dump $ unlines $
+    [ unwords ("A" : [ concatMap byte (BS.unpack a) | not (BS.null a) ])
+    | a <- as ]
+    <> [ "N " <> showHex (length es) "" <> " "
+           <> showHex (sum (fmap ((+ 1) . BS.length) es)) ""
+       , "X " <> show (exitStatus code) ]
+  where
+    byte w = case showHex w "" of
+      [ d ] -> [ '0', d ]
+      ds -> ds
 
 diff :: Opts -> [FilePath] -> IO ()
 diff o paths = do
@@ -272,6 +383,28 @@ diff o paths = do
   dumps <- traverse readOne paths
   controls <- traverse readOne (oControls o)
   designed <- traverse readOne (oDesigned o)
+  -- every run with how it was made: the declared, the designed, then
+  -- the controls. Runs made apart differ by more than the secret,
+  -- and are refused, not compared
+  named <- traverse (\(p, k, d) -> case dpRun d of
+      Just r -> pure (p, Named (T.pack (takeFileName p)) k r)
+      Nothing -> refuse (p <> " holds no record of how it was run \
+        \(vestigia record appends one), so nothing says what it ran"))
+    (zip3 (paths <> oDesigned o <> oControls o)
+          (fmap (const DeclaredRun) paths
+             <> fmap (const DesignedRun) (oDesigned o)
+             <> fmap (const ControlRun) (oControls o))
+          (dumps <> designed <> controls))
+  case named of
+    ((p0, first) : rest) -> for_ rest $ \(p, n) -> do
+      for_ (runApart (nmRun first) (nmRun n)) $ \why ->
+        refuse (p <> " " <> why <> " (" <> p0 <> "); runs compared \
+          \must differ in the secret alone")
+      when (nmKind n == ControlRun
+              && rnArguments (nmRun n) /= rnArguments (nmRun first)) $
+        refuse (p <> " is a control, but does not repeat the \
+          \arguments of " <> p0 <> ", the run it controls")
+    [] -> pure ()
   -- runs laid out apart differ wherever they touch memory, not by
   -- the secret: such runs are refused, not compared
   case zip paths dumps of
@@ -291,20 +424,23 @@ diff o paths = do
     [] -> pure ()
   let dv = restrictTo (oObjects o)
         (diffDesigned controls dumps designed)
-  places <- symbolize addr2line
+  places <- symbolize addr2line $
     [ (obj, inOffset i) | (_, i) <- dvOrigins dv
                         , Just obj <- [ inObject i ] ]
-  -- a run is named by its dump's file name, the declared first
-  let names = fmap (T.pack . takeFileName) (paths <> oDesigned o)
-      doc = encode
-        (divergenceJson (T.pack (showVersion version)) names places dv)
+    -- the calls that reached each origin
+    <> [ (obj, a) | (_, i) <- dvOrigins dv
+                  , Just (stacks, _) <- [ M.lookup (inPc i) (dvCallers dv) ]
+                  , calls <- stacks, (Just obj, a) <- calls ]
+  let doc = encode (divergenceJson (T.pack (showVersion version))
+        (fmap snd named) places dv)
   maybe (TIO.putStr doc) (\p -> TIO.writeFile p doc) (oOut o)
   TIO.hPutStr stderr (divergenceSummary places dv)
   where
     readOne p = do
       bytes <- BS.readFile p
       case readDump (TE.decodeUtf8With TEE.lenientDecode bytes) of
-        Left e -> do
-          hPutStrLn stderr ("vestigia: " <> p <> ": " <> e)
-          exitWith (ExitFailure 2)
+        Left e -> refuse (p <> ": " <> e)
         Right d -> pure d
+    refuse e = do
+      hPutStrLn stderr ("vestigia: " <> e)
+      exitWith (ExitFailure 2)

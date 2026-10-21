@@ -36,7 +36,7 @@ let
   traceOf = build: lib: root: vestigia.lib.${system}.traceOf {
     name = "penumbra-${build}-${root}";
     harness = "${harnessFor lib}/bin/harness";
-    args = [ root "4" ];
+    runs = [ [ root "4" ] ];
   };
 
   roots = [ "public_key" "key_agreement" "spend_auth_sign" ];
