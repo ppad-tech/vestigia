@@ -6,8 +6,8 @@ A Haskell tool that finds where a program's execution depended on a
 secret, by running it.
 
 vestigia executes a harness, reports every instruction that branched
-on the secret or computed an address from it, and names each by
-function and source line.
+on the secret, computed an address from it, or divided by or into
+it, and names each by function and source line.
 
 A clean report is not a proof of constant-time execution. It
 covers only the paths the harness drove, and the discipline
@@ -39,8 +39,9 @@ can time the same harness. A run that marks nothing is refused.
 ### Taint: `vestigia run`
 
 `run` executes the harness under valgrind's memcheck with the marked
-bytes undefined, and reports every branch and address that descends
-from them:
+bytes undefined, and reports every branch, address, and integer
+division operand that descends from them (memcheck reports the last
+through vestigia's patch, `nix/memcheck-operand.patch`):
 
 ```
 $ vestigia run --out trace.json -- ./harness public_key 4

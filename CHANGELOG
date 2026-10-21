@@ -6,9 +6,11 @@
     a foreign function interface too and records where the loader
     put each object):
     * `vestigia run`: the harness under memcheck with the secret's
-      bytes undefined, reporting each branch and address computed
-      from them (vestigia/trace-v1); `vestigia read` reports from
-      memcheck's XML.
+      bytes undefined, reporting each branch, address, and integer
+      division operand computed from them, the last through a
+      memcheck patch, each at its own instruction
+      (vestigia/trace-v1); `vestigia read` reports from memcheck's
+      XML.
     * `vestigia record` and `vestigia diff`: the harness under QEMU
       with vestigia's plugin, its leakage trace summarised per
       instruction, and where runs differing only in the secret

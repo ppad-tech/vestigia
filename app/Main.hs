@@ -143,8 +143,12 @@ options = go (Opts Nothing Nothing Nothing Nothing Nothing Nothing
 
 -- the settings every trace runs under: origins tracked so a
 -- secret's descendants are known as such, no limit on contexts,
--- the precise definedness checks optimised code needs, and no
--- leak report
+-- the precise definedness checks optimised code needs, every
+-- register (the instruction pointer among them) brought up to date
+-- at each instruction of a program's own code, so that a site that
+-- touches no memory, a division by a register, is named by its own
+-- address rather than the last memory access before it, and no leak
+-- report
 memcheckArgs :: FilePath -> [String]
 memcheckArgs xml =
   [ "--tool=memcheck"
@@ -154,6 +158,7 @@ memcheckArgs xml =
   , "--error-limit=no"
   , "--num-callers=24"
   , "--expensive-definedness-checks=yes"
+  , "--px-file-backed=allregs-at-each-insn"
   , "--leak-check=no"
   , "--child-silent-after-fork=yes"
   ]

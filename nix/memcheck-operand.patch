@@ -1,0 +1,316 @@
+memcheck lets an undefined operand flow into a division's quotient
+without a word: it reports an undefined value only where it decides a
+branch or forms an address. An integer division takes a time that
+depends on its operands, so a division of or by a secret leaks it,
+and a taint trace should say so.
+
+This adds an error kind, UninitOperand ("Integer division depends on
+uninitialised value(s)", suppressed as "Operand"), with its origin
+tracked as a condition's is, and reports it for each undefined
+operand of every integer division the guest's code is lifted to:
+DivModU/S128to64, 64to32, 64to64, and 32to32 (x86_64's DIV and IDIV
+among them), DivU/S32 and 64 and their E forms (aarch64's UDIV and
+SDIV), and the 128-bit divisions and modulos. Unlike the checks
+before an address or a branch, it leaves the operands undefined
+after reporting them, so the quotient's undefinedness, and what is
+reported downstream of it, is as it would have been.
+
+--- a/memcheck/mc_errors.c
++++ b/memcheck/mc_errors.c
+@@ -63,6 +63,7 @@
+    enum { 
+       Err_Value,
+       Err_Cond,
++      Err_Operand,
+       Err_CoreMem,
+       Err_Addr, 
+       Err_Jump, 
+@@ -108,6 +109,14 @@
+          ExeContext* origin_ec; // filled in later
+       } Cond;
+ 
++      // Use of an undefined value as an operand of an integer
++      // division, whose time depends on its operands.
++      struct {
++         // Origin info
++         UInt        otag;      // origin tag
++         ExeContext* origin_ec; // filled in later
++      } Operand;
++
+       // Addressability error in core (signal-handling) operation.
+       // It would be good to get rid of this error kind, merge it with
+       // another one somehow.
+@@ -527,6 +536,26 @@
+          }
+          break;
+ 
++      case Err_Operand:
++         MC_(any_value_errors) = True;
++         if (xml) {
++            emit( "  <kind>UninitOperand</kind>\n" );
++            emit( "  <what>Integer division depends"
++                  " on uninitialised value(s)</what>\n" );
++            VG_(pp_ExeContext)( VG_(get_error_where)(err) );
++            if (extra->Err.Operand.origin_ec)
++               mc_pp_origin( extra->Err.Operand.origin_ec,
++                             extra->Err.Operand.otag & 3 );
++         } else {
++            emit( "Integer division depends"
++                  " on uninitialised value(s)\n" );
++            VG_(pp_ExeContext)( VG_(get_error_where)(err) );
++            if (extra->Err.Operand.origin_ec)
++               mc_pp_origin( extra->Err.Operand.origin_ec,
++                             extra->Err.Operand.otag & 3 );
++         }
++         break;
++
+       case Err_RegParam:
+          MC_(any_value_errors) = True;
+          if (xml) {
+@@ -936,6 +965,18 @@
+    VG_(maybe_record_error)( tid, Err_Cond, /*addr*/0, /*s*/NULL, &extra );
+ }
+ 
++void MC_(record_operand_error) ( ThreadId tid, UInt otag )
++{
++   MC_Error extra;
++   tl_assert( MC_(clo_mc_level) >= 2 );
++   if (otag > 0)
++      tl_assert( MC_(clo_mc_level) == 3 );
++   extra.Err.Operand.otag      = otag;
++   extra.Err.Operand.origin_ec = NULL;  /* Filled in later */
++   VG_(maybe_record_error)( tid, Err_Operand, /*addr*/0, /*s*/NULL,
++                            &extra );
++}
++
+ /* --- Called from non-generated code --- */
+ 
+ /* This is for memory errors in signal-related memory. */
+@@ -1214,6 +1255,7 @@
+       case Err_IllegalMempool:
+       case Err_Overlap:
+       case Err_Cond:
++      case Err_Operand:
+       case Err_ReallocSizeZero:
+       case Err_UnsafeZeroSize:
+          return True;
+@@ -1423,6 +1465,10 @@
+       update_origin( &extra->Err.Cond.origin_ec,
+                      extra->Err.Cond.otag );
+       return sizeof(MC_Error);
++   case Err_Operand:
++      update_origin( &extra->Err.Operand.origin_ec,
++                     extra->Err.Operand.otag );
++      return sizeof(MC_Error);
+    case Err_RegParam:
+       update_origin( &extra->Err.RegParam.origin_ec,
+                      extra->Err.RegParam.otag );
+@@ -1557,6 +1603,9 @@
+       // Undefined value error in conditional.
+       CondSupp,
+ 
++      // Undefined value error in an integer division's operand.
++      OperandSupp,
++
+       // Unaddressable read/write attempt at given size
+       Addr1Supp, Addr2Supp, Addr4Supp, Addr8Supp, Addr16Supp, Addr32Supp,
+ 
+@@ -1593,6 +1642,7 @@
+    else if (VG_STREQ(name, "Overlap")) skind = OverlapSupp;
+    else if (VG_STREQ(name, "Mempool")) skind = MempoolSupp;
+    else if (VG_STREQ(name, "Cond"))    skind = CondSupp;
++   else if (VG_STREQ(name, "Operand")) skind = OperandSupp;
+    else if (VG_STREQ(name, "Value0"))  skind = CondSupp; /* backwards compat */
+    else if (VG_STREQ(name, "Value1"))  skind = Value1Supp;
+    else if (VG_STREQ(name, "Value2"))  skind = Value2Supp;
+@@ -1739,6 +1789,9 @@
+       case CondSupp:
+          return (ekind == Err_Cond);
+ 
++      case OperandSupp:
++         return (ekind == Err_Operand);
++
+       case Addr1Supp: su_szB = 1; goto addr_case;
+       case Addr2Supp: su_szB = 2; goto addr_case;
+       case Addr4Supp: su_szB = 4; goto addr_case;
+@@ -1822,6 +1875,7 @@
+    case Err_Overlap:         return "Overlap";
+    case Err_Leak:            return "Leak";
+    case Err_Cond:            return "Cond";
++   case Err_Operand:         return "Operand";
+    case Err_FishyValue:      return "FishyValue";
+    case Err_ReallocSizeZero: return "ReallocZero";
+    case Err_BadAlign:        return "BadAlign";
+--- a/memcheck/mc_include.h
++++ b/memcheck/mc_include.h
+@@ -551,6 +551,7 @@
+ void MC_(record_address_error) ( ThreadId tid, Addr a, Int szB,
+                                  Bool isWrite );
+ void MC_(record_cond_error)    ( ThreadId tid, UInt otag );
++void MC_(record_operand_error) ( ThreadId tid, UInt otag );
+ void MC_(record_value_error)   ( ThreadId tid, Int szB, UInt otag );
+ void MC_(record_jump_error)    ( ThreadId tid, Addr a );
+ 
+@@ -773,6 +774,7 @@
+ VG_REGPARM(1) void MC_(helperc_value_check4_fail_w_o) ( UWord );
+ VG_REGPARM(1) void MC_(helperc_value_check1_fail_w_o) ( UWord );
+ VG_REGPARM(1) void MC_(helperc_value_check0_fail_w_o) ( UWord );
++VG_REGPARM(1) void MC_(helperc_operand_check_fail_w_o) ( UWord );
+ 
+ /* And call these ones instead to report an uninitialised value error
+    but with no origin available. */
+@@ -781,6 +783,7 @@
+ VG_REGPARM(0) void MC_(helperc_value_check4_fail_no_o) ( void );
+ VG_REGPARM(0) void MC_(helperc_value_check1_fail_no_o) ( void );
+ VG_REGPARM(0) void MC_(helperc_value_check0_fail_no_o) ( void );
++VG_REGPARM(0) void MC_(helperc_operand_check_fail_no_o) ( void );
+ 
+ /* V-bits load/store helpers */
+ VG_REGPARM(1) void MC_(helperc_STOREV64be) ( Addr, ULong );
+--- a/memcheck/mc_main.c
++++ b/memcheck/mc_main.c
+@@ -5751,6 +5751,11 @@
+ }
+ 
+ VG_REGPARM(1)
++void MC_(helperc_operand_check_fail_w_o) ( UWord origin ) {
++   MC_(record_operand_error) ( VG_(get_running_tid)(), (UInt)origin );
++}
++
++VG_REGPARM(1)
+ void MC_(helperc_value_check1_fail_w_o) ( UWord origin ) {
+    MC_(record_value_error) ( VG_(get_running_tid)(), 1, (UInt)origin );
+ }
+@@ -5775,6 +5780,11 @@
+ VG_REGPARM(0)
+ void MC_(helperc_value_check0_fail_no_o) ( void ) {
+    MC_(record_cond_error) ( VG_(get_running_tid)(), 0/*origin*/ );
++}
++
++VG_REGPARM(0)
++void MC_(helperc_operand_check_fail_no_o) ( void ) {
++   MC_(record_operand_error) ( VG_(get_running_tid)(), 0/*origin*/ );
+ }
+ 
+ VG_REGPARM(0)
+--- a/memcheck/mc_translate.c
++++ b/memcheck/mc_translate.c
+@@ -1772,6 +1772,57 @@
+ }
+ 
+ 
++/* Check the supplied *original* atoms, the operands of an integer
++   division, for undefinedness, and emit a complaint for each that is
++   undefined.  A division takes a time that depends on its operands,
++   so an undefined operand is reported as its own kind of error
++   (Err_Operand), apart from a value used as an address or a
++   condition.  Unlike complainIfUndefined, the atoms are not then
++   marked defined: the quotient carries its operands' undefinedness
++   on, as it would had nothing been reported. */
++static void complainIfOperandsUndefined ( MCEnv* mce,
++                                          IRAtom* atom1, IRAtom* atom2 )
++{
++   IRAtom* atoms[2] = { atom1, atom2 };
++   Int     k;
++
++   if (MC_(clo_mc_level) == 1)
++      return;
++
++   for (k = 0; k < 2; k++) {
++      IRAtom*  vatom;
++      IRAtom*  origin;
++      IRDirty* di;
++
++      tl_assert(isOriginalAtom(mce, atoms[k]));
++      vatom = expr2vbits( mce, atoms[k], HuOth );
++      tl_assert(isShadowAtom(mce, vatom));
++
++      if (MC_(clo_mc_level) == 3) {
++         origin = schemeE( mce, atoms[k] );
++         if (mce->hWordTy == Ity_I64) {
++            origin = assignNew( 'B', mce, Ity_I64,
++                                unop(Iop_32Uto64, origin) );
++         }
++         di = unsafeIRDirty_0_N(
++                 1, "MC_(helperc_operand_check_fail_w_o)",
++                 VG_(fnptr_to_fnentry)(
++                    &MC_(helperc_operand_check_fail_w_o) ),
++                 mkIRExprVec_1(origin) );
++      } else {
++         di = unsafeIRDirty_0_N(
++                 0, "MC_(helperc_operand_check_fail_no_o)",
++                 VG_(fnptr_to_fnentry)(
++                    &MC_(helperc_operand_check_fail_no_o) ),
++                 mkIRExprVec_0() );
++      }
++      di->guard = mkPCastTo( mce, Ity_I1, vatom );
++      setHelperAnns( mce, di );
++      stmt( 'V', mce, IRStmt_Dirty(di) );
++   }
++}
++
++
+ /*------------------------------------------------------------*/
+ /*--- Shadowing PUTs/GETs, and indexed variants thereof    ---*/
+ /*------------------------------------------------------------*/
+@@ -4153,6 +4204,7 @@
+       case Iop_ModU128:
+       case Iop_ModS128:
+          /* I128 x I128 -> I128 */
++         complainIfOperandsUndefined(mce, atom1, atom2);
+          return mkLazy2(mce, Ity_V128, vatom1, vatom2);
+ 
+       case Iop_QNarrowBin64Sto32Sx4:
+@@ -4687,10 +4739,12 @@
+ 
+       case Iop_DivModU64to32:
+       case Iop_DivModS64to32:
++         complainIfOperandsUndefined(mce, atom1, atom2);
+          return mkLazy2(mce, Ity_I64, vatom1, vatom2);
+ 
+       case Iop_DivModU128to64:
+       case Iop_DivModS128to64:
++         complainIfOperandsUndefined(mce, atom1, atom2);
+          return mkLazy2(mce, Ity_I128, vatom1, vatom2);
+ 
+       case Iop_8HLto16:
+@@ -4703,6 +4757,7 @@
+       case Iop_DivModU64to64:
+       case Iop_DivModS64to64: {
+          IRAtom* vTmp64 = mkLazy2(mce, Ity_I64, vatom1, vatom2);
++         complainIfOperandsUndefined(mce, atom1, atom2);
+          return assignNew('V', mce, Ity_I128,
+                           binop(Iop_64HLto128, vTmp64, vTmp64));
+       }
+@@ -4718,6 +4773,7 @@
+       case Iop_DivModU32to32:
+       case Iop_DivModS32to32: {
+          IRAtom* vTmp32 = mkLazy2(mce, Ity_I32, vatom1, vatom2);
++         complainIfOperandsUndefined(mce, atom1, atom2);
+          return assignNew('V', mce, Ity_I64,
+                           binop(Iop_32HLto64, vTmp32, vTmp32));
+       }
+@@ -4745,11 +4801,14 @@
+          return assignNew('V', mce, Ity_I16, binop(Iop_8HLto16, vHi8, vLo8));
+       }
+ 
+-      case Iop_Sad8Ux4: /* maybe we could do better?  ftm, do mkLazy2. */
+       case Iop_DivS32:
+       case Iop_DivU32:
+       case Iop_DivU32E:
+       case Iop_DivS32E:
++         complainIfOperandsUndefined(mce, atom1, atom2);
++         return mkLazy2(mce, Ity_I32, vatom1, vatom2);
++
++      case Iop_Sad8Ux4: /* maybe we could do better?  ftm, do mkLazy2. */
+       case Iop_QAdd32S: /* could probably do better */
+       case Iop_QSub32S: /* could probably do better */
+          return mkLazy2(mce, Ity_I32, vatom1, vatom2);
+@@ -4758,6 +4817,7 @@
+       case Iop_DivU64:
+       case Iop_DivS64E:
+       case Iop_DivU64E:
++         complainIfOperandsUndefined(mce, atom1, atom2);
+          return mkLazy2(mce, Ity_I64, vatom1, vatom2);
+ 
+       case Iop_Add32:

@@ -11,11 +11,12 @@
 -- whose undefined value was created by a client request descends
 -- from a byte the harness marked secret, so it is a site where the
 -- execution depended on the secret: a branch (`control`), an
--- address computed from it (`address`), or a system call handed
--- it (`syscall`). Every other uninitialised read is kept apart as
--- `unrelated`, and memory errors as `faults`: neither says
--- anything about the secret. Leak reports say nothing about the
--- execution and are dropped.
+-- address computed from it (`address`), an integer division's
+-- operand (`operand`, from vestigia's patched memcheck), or a
+-- system call handed it (`syscall`). Every other uninitialised read
+-- is kept apart as `unrelated`, and memory errors as `faults`:
+-- neither says anything about the secret. Leak reports say nothing
+-- about the execution and are dropped.
 
 module Vestigia.Trace (
     Class(..)
@@ -43,6 +44,7 @@ import Vestigia.Memcheck
 data Class =
     Control
   | Address
+  | Operand
   | Syscall
   deriving (Eq, Ord, Show)
 
@@ -71,6 +73,7 @@ classText :: Class -> T.Text
 classText c = case c of
   Control -> "control"
   Address -> "address"
+  Operand -> "operand"
   Syscall -> "syscall"
 
 -- what a secret-originated error says about the execution
@@ -78,12 +81,14 @@ classify :: MemError -> Maybe Class
 classify e = case (meOrigin e, meKind e) of
   (ClientRequest _, "UninitCondition") -> Just Control
   (ClientRequest _, "UninitValue") -> Just Address
+  (ClientRequest _, "UninitOperand") -> Just Operand
   (ClientRequest _, "SyscallParam") -> Just Syscall
   _ -> Nothing
 
 uninitialised :: MemError -> Bool
 uninitialised e =
-  meKind e `elem` [ "UninitCondition", "UninitValue", "SyscallParam" ]
+  meKind e `elem`
+    [ "UninitCondition", "UninitValue", "UninitOperand", "SyscallParam" ]
 
 -- | The run's leakage. Sites are one per instruction and class:
 --   memcheck reports one context per distinct stack, and the
@@ -179,6 +184,7 @@ traceJson version exit tr = Object
   , ("summary", Object
       [ ("control", count Control)
       , ("address", count Address)
+      , ("operand", count Operand)
       , ("syscall", count Syscall)
       , ("unrelated", Number (toInteger (length (trUnrelated tr))))
       , ("faults", Number (toInteger (length (trFaults tr))))

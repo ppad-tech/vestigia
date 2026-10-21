@@ -52,7 +52,8 @@ let
   # each report's (class, function) pairs in the harness, sorted
   expected = {
     trace = [ [ "address" "lookup" ] [ "control" "branchy" ]
-              [ "control" "calls" ] ];
+              [ "control" "calls" ] [ "operand" "divide" ]
+              [ "operand" "divide_memory" ] ];
     diff = [ [ "address" "lookup" ] [ "control" "branchy" ]
              [ "control" "calls" ] [ "operand" "divide" ]
              [ "operand" "divide_memory" ] ];
@@ -74,6 +75,14 @@ pkgs.runCommand "vestigia-probe-check" {
   check ${diff}/diff.json \
     '[.origins[] | [.class, .frames[0].function]] | unique' \
     '${builtins.toJSON expected.diff}'
+
+  # both instruments name each instruction they both saw by one
+  # address: a division memcheck reports where it divides, not at the
+  # memory access before it
+  check ${trace}/trace.json \
+    '[.sites[] | select(.class == "operand") | .offset] | sort' \
+    "$(jq -c '[.origins[] | select(.class == "operand") | .offset]
+              | sort' ${diff}/diff.json)"
   ${lib.optionalString x86_64 ''
     check ${diffCross}/diff.json \
       '[.origins[] | [.class, .frames[0].function]] | unique' \

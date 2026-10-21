@@ -16,9 +16,12 @@ let
   });
 
   # memcheck runs on Linux only; elsewhere the command can still
-  # read a run's XML
+  # read a run's XML. It reports an integer division's undefined
+  # operands (memcheck-operand.patch)
   linux = pkgs.stdenv.hostPlatform.isLinux;
-  valgrind = pkgs.valgrind;
+  valgrind = pkgs.valgrind.overrideAttrs (o: {
+    patches = (o.patches or [ ]) ++ [ ./memcheck-operand.patch ];
+  });
 
   # the QEMU plugin recording a run's leakage trace per
   # instruction, and the QEMU that runs a harness under it, for
