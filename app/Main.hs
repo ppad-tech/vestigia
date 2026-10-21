@@ -16,6 +16,7 @@ module Main (
 import Control.Exception (IOException, try)
 import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
+import Data.Char (toUpper)
 import Data.Foldable (for_)
 import Data.Version (showVersion)
 import qualified GHC.Foreign as GF
@@ -29,7 +30,8 @@ import System.Directory (getTemporaryDirectory, removeFile)
 import System.Environment (getArgs, getEnvironment, lookupEnv)
 import System.Exit (ExitCode(..), exitWith)
 import System.FilePath (takeFileName)
-import System.IO (hClose, hPutStrLn, openTempFile, stderr)
+import System.IO
+  (IOMode(..), hClose, hPutStrLn, openTempFile, stderr, withBinaryFile)
 import System.Process (proc, waitForProcess, withCreateProcess)
 import qualified System.Process as P
 
@@ -109,8 +111,10 @@ usage e = do
     , "--object keeps origins in objects whose path contains TEXT;"
     , "--control names a run repeating the first run's secret, and"
     , "what differs in it is unsteady, not an origin."
-    , "qemu, the plugin, and addr2line default to $VESTIGIA_QEMU,"
-    , "$VESTIGIA_PLUGIN, and $VESTIGIA_ADDR2LINE."
+    , "QEMU is the one for PROGRAM's architecture: --qemu, else"
+    , "$VESTIGIA_QEMU_X86_64 or $VESTIGIA_QEMU_AARCH64, else"
+    , "qemu-x86_64 or qemu-aarch64 on PATH. The plugin and addr2line"
+    , "default to $VESTIGIA_PLUGIN and $VESTIGIA_ADDR2LINE."
     ]
   exitWith (ExitFailure 2)
 
@@ -241,7 +245,10 @@ record o prog progArgs = do
     hPutStrLn stderr "vestigia: address randomisation could not be \
       \turned off; runs would differ in layout, and so everywhere"
     exitWith (ExitFailure 2)
-  qemu <- tool (oQemu o) "VESTIGIA_QEMU" "qemu-x86_64"
+  -- QEMU's user mode runs the programs of one architecture
+  isa <- machineOf prog
+  qemu <- tool (oQemu o) ("VESTIGIA_QEMU_" <> fmap toUpper isa)
+    ("qemu-" <> isa)
   plugin <- tool (oPlugin o) "VESTIGIA_PLUGIN" "libvestigia-qemu.so"
   -- QEMU maps the guest's libraries and heap in its own address
   -- space, wherever its own allocations leave room, and those vary
@@ -278,6 +285,23 @@ record o prog progArgs = do
       appendRun dump (prog : progArgs)
         (others <> [ (tunables, v) | Just v <- [ own ] ]) c
       exitWith c
+
+-- the architecture an ELF program is built for, as QEMU names its
+-- user-mode emulators: the header's machine, at byte 18
+machineOf :: FilePath -> IO String
+machineOf prog = do
+  r <- try (withBinaryFile prog ReadMode (\h -> BS.hGet h 20))
+  case fmap BS.unpack r of
+    Right (0x7f : 0x45 : 0x4c : 0x46 : _ : 1 : rest)
+      | [ 0x3e, 0 ] <- drop 12 rest -> pure "x86_64"
+      | [ 0xb7, 0 ] <- drop 12 rest -> pure "aarch64"
+    Right _ -> unknown "not an x86_64 or aarch64 ELF program"
+    Left e -> unknown (show (e :: IOException))
+  where
+    unknown why = do
+      hPutStrLn stderr ("vestigia: " <> prog <> ": " <> why
+        <> "; QEMU's user mode runs one")
+      exitWith (ExitFailure 2)
 
 -- append a run's record to its dump (Vestigia.Diff.readDump): its
 -- arguments' bytes, its environment's variables and the bytes they

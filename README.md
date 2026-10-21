@@ -143,7 +143,8 @@ ppad-poly1305, and ppad-secp256k1.
 * What a function is meant to reveal (a comparison's result, a
   public key) must be marked public, or it is reported.
 * valgrind and QEMU's user mode run on Linux; elsewhere vestigia only
-  reads their reports. QEMU traces other ISAs differentially, but
+  reads their reports. `record` runs an x86_64 or aarch64 harness on
+  either host, choosing QEMU by the program's ELF header, but
   memcheck needs a native host.
 * The plugin records one guest thread: a guest that starts a second
   is stopped, and its dump refused. Runs compared by `diff` must

@@ -21,19 +21,16 @@ let
   valgrind = pkgs.valgrind;
 
   # the QEMU plugin recording a run's leakage trace per
-  # instruction, and the QEMU that runs a harness of this
-  # system's ISA under it: user mode alone, its guest's getrandom
-  # drawn from the generator -seed fixes (qemu-getrandom.patch)
+  # instruction, and the QEMU that runs a harness under it, for
+  # either ISA, whatever the host's: user mode alone, its guest's
+  # getrandom drawn from the generator -seed fixes
+  # (qemu-getrandom.patch)
   qemu = (pkgs.qemu.override {
     userOnly = true;
     hostCpuTargets = [ "x86_64-linux-user" "aarch64-linux-user" ];
   }).overrideAttrs (o: {
     patches = (o.patches or [ ]) ++ [ ./qemu-getrandom.patch ];
   });
-  qemuFor = {
-    x86_64 = "${qemu}/bin/qemu-x86_64";
-    aarch64 = "${qemu}/bin/qemu-aarch64";
-  };
   plugin = pkgs.runCommandCC "vestigia-qemu-plugin" {
     nativeBuildInputs = [ pkgs.pkg-config ];
     buildInputs = [ pkgs.glib ];
@@ -43,9 +40,6 @@ let
       $(pkg-config --cflags glib-2.0) -I${qemu}/include \
       -o $out/lib/libvestigia-qemu.so ${src}/plugin/vestigia-qemu.c
   '';
-  isa = builtins.head
-    (lib.splitString "-" pkgs.stdenv.hostPlatform.system);
-
   # the harness-side header; a harness build also needs
   # valgrind's own (valgrindDev)
   include = pkgs.runCommand "vestigia-include" { } ''
@@ -54,7 +48,8 @@ let
     cp ${src}/include/vestigia.c $out/include/vestigia.c
   '';
 
-  # the command, with the valgrind it was built against baked in
+  # the command, with the valgrind it was built against baked in,
+  # and an addr2line that reads either ISA's objects
   vestigia = pkgs.runCommand "vestigia" {
     nativeBuildInputs = [ pkgs.makeWrapper ];
   } ''
@@ -62,11 +57,12 @@ let
     makeWrapper ${hpkgs.vestigia}/bin/vestigia $out/bin/vestigia \
       ${lib.optionalString linux (lib.concatStringsSep " " [
         "--set-default VESTIGIA_VALGRIND ${valgrind}/bin/valgrind"
-        "--set-default VESTIGIA_QEMU ${qemuFor.${isa}}"
+        "--set-default VESTIGIA_QEMU_X86_64 ${qemu}/bin/qemu-x86_64"
+        "--set-default VESTIGIA_QEMU_AARCH64 ${qemu}/bin/qemu-aarch64"
         "--set-default VESTIGIA_PLUGIN"
         "${plugin}/lib/libvestigia-qemu.so"
         "--set-default VESTIGIA_ADDR2LINE"
-        "${pkgs.binutils-unwrapped}/bin/addr2line"
+        "${pkgs.binutils-unwrapped-all-targets}/bin/addr2line"
       ])}
     ln -s ${include}/include $out/include
   '';

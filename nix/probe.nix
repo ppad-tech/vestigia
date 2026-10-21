@@ -1,23 +1,30 @@
 # The probe check: etc/probe/harness.c under both instruments, each
 # site and origin it should show found where it should be, and
-# nothing else in the harness.
+# nothing else in the harness. On an x86_64 host, the same harness
+# built for aarch64 is traced differentially too, under QEMU; memcheck
+# needs a native host.
 { pkgs, vestigia }:
 
 let
   lib = pkgs.lib;
 
-  # linked at a fixed address, where an instruction's address in the
-  # file is not its offset there
-  probe = pkgs.runCommandCC "vestigia-probe" {
-    buildInputs = [ vestigia.valgrindDev ];
+  # the harness, built by a package set's C compiler and linked at a
+  # fixed address, where an instruction's address in the file is not
+  # its offset there
+  probeOf = ps: ps.runCommandCC "vestigia-probe" {
     hardeningDisable = [ "fortify" ];
   } ''
     mkdir -p $out/bin
-    cc -O0 -g -fno-pie -no-pie -I${vestigia.include}/include \
+    $CC -O0 -g -fno-pie -no-pie -I${vestigia.include}/include \
+      -I${vestigia.valgrindDev}/include \
       -o $out/bin/probe ${../etc/probe/harness.c} \
       ${vestigia.include}/include/vestigia.c
-    readelf -h $out/bin/probe | grep -q 'Type: *EXEC'
+    $READELF -h $out/bin/probe | grep -q 'Type: *EXEC'
   '';
+
+  probe = probeOf pkgs;
+  cross = probeOf pkgs.pkgsCross.aarch64-multiplatform;
+  x86_64 = pkgs.stdenv.hostPlatform.isx86_64;
 
   threads = pkgs.runCommandCC "vestigia-probe-threads" { } ''
     mkdir -p $out/bin
@@ -34,12 +41,13 @@ let
     inherit objects;
   };
 
-  diff = vestigia.diffOf {
-    name = "probe";
-    harness = "${probe}/bin/probe";
+  diffOf = name: harness: vestigia.diffOf {
+    inherit name objects;
+    harness = "${harness}/bin/probe";
     runs = map (s: [ s ]) secrets;
-    inherit objects;
   };
+  diff = diffOf "probe" probe;
+  diffCross = diffOf "probe-aarch64" cross;
 
   # each report's (class, function) pairs in the harness, sorted
   expected = {
@@ -63,6 +71,11 @@ pkgs.runCommand "vestigia-probe-check" {
   check ${diff}/diff.json \
     '[.origins[] | [.class, .frames[0].function]] | unique' \
     '${builtins.toJSON expected.diff}'
+  ${lib.optionalString x86_64 ''
+    check ${diffCross}/diff.json \
+      '[.origins[] | [.class, .frames[0].function]] | unique' \
+      '${builtins.toJSON expected.diff}'
+  ''}
 
   # each run as it was made: the declared, then the control
   check ${diff}/diff.json \
