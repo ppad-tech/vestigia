@@ -1,6 +1,6 @@
 # Changelog
 
-- 0.1.0 (unreleased)
+- 0.1.0 (2026-10-22)
   * Initial version, with two instruments over a harness that marks
     its secret (`vestigia.h`, defined by `vestigia.c`, which serves
     a foreign function interface too and records where the loader
