@@ -29,7 +29,11 @@ library
   c-sources:
       cbits/norandom.c
   exposed-modules:
-      Vestigia.Diff
+      Vestigia.Contract
+    , Vestigia.Contract.Arm
+    , Vestigia.Contract.Intel
+    , Vestigia.Contract.Types
+    , Vestigia.Diff
     , Vestigia.Json
     , Vestigia.Layout
     , Vestigia.Memcheck
