@@ -108,19 +108,46 @@ loaded an object at different addresses. A guest reading
 `/dev/urandom` still reads the host's.
 
 `record` appends to its dump how the run was made: the program and
-its arguments, the size of the guest's environment, and the exit
-status, which the report gives for each run. `diff` refuses a run of
-another program, or with arguments of another number or length, or an
-environment of another size, than the first run's, each of which lays
-the guest's stack out apart; and a control that does not repeat the
-first run's arguments.
+its arguments, the size of the guest's environment, the exit status,
+and the guest's ISA, which the report gives for each run. `diff`
+refuses a run of another program, or with arguments of another
+number or length, or an environment of another size, than the first
+run's, each of which lays the guest's stack out apart; and a control
+that does not repeat the first run's arguments.
+
+### Under a contract: `record --contract`
+
+An ISA's data-independent-timing contract lists the instructions
+whose time does not depend on their data: Arm's `PSTATE.DIT`
+(`arm-dit`) and Intel's DOITM (`intel-doitm`), transcribed from the
+vendors' own statements (`lib/Vestigia/Contract/Arm.hs`, generated
+from Arm's A64 ISA XML, and `lib/Vestigia/Contract/Intel.hs`, from
+Intel's list, each citing its release). Under one, `record`
+disassembles the objects the program loads whose path contains an
+`--object` text (with LLVM's `llvm-objdump`: `--objdump`, else
+`$VESTIGIA_OBJDUMP`), and the plugin fingerprints the operands of
+every instruction outside the contract, as it does a division's:
+
+```
+$ vestigia record --contract intel-doitm --object /bin/probe \
+>   --dump run-1 -- ./probe 00000005
+```
+
+One run equally often on other operands in some run is reported by
+`diff` apart from the origins, under `outside`, with its text: the
+contract says nothing of its time either way, so it qualifies a
+clean report rather than failing it. The report names the contract
+and the ISA, and how many instructions outside the contract ran.
+Runs compared must have been recorded under the same contract. A
+division is an operand origin, as without a contract.
 
 ### As derivations
 
 The flake's `lib.<system>` holds `traceOf` and `diffOf`, which run
 either instrument as a derivation over a list of runs; an
 `x86_64-linux` run executes on any builder for that system, and its
-report is cached. `diffOf` repeats the first run as its control.
+report is cached. `diffOf` repeats the first run as its control, and takes a
+`contract` to record under.
 `nix/lib.nix` holds the same for a consumer's own nixpkgs, beside
 `version`.
 
@@ -134,7 +161,7 @@ vestigia.lib.x86_64-linux.diffOf {
 ```
 
 The output holds `trace.json` (`vestigia/trace-v2`) or `diff.json`
-(`vestigia/diff-v3`), the runs kept or the plugin's dumps, what the
+(`vestigia/diff-v4`), the runs kept or the plugin's dumps, what the
 harness printed, and the wall time.
 
 ## Two instruments
@@ -165,9 +192,14 @@ ppad-poly1305, and ppad-secp256k1.
 * An address origin can be an address that an earlier secret branch
   moved, a heap block or stack frame laid out apart, rather than one
   computed from the secret.
-* Divisions alone are read for their operands. Floating-point
-  division and square root, and multiplication on cores that time it
-  by its operands, are left to a timing instrument.
+* Without a contract, divisions alone are read for their operands.
+  Under one, an instruction's source registers are read off its
+  encoding (AArch64) or its operands (x86_64, with the registers some
+  instructions read without naming); flags are not read, and a
+  256- or 512-bit vector is read by its low 128 bits, all of it QEMU
+  names. A contract covers the ISA's statement, not a core's: a core
+  that does not honour it (or a deployment that does not enable it)
+  is for a timing instrument.
 * A GHC harness wants `-with-rtsopts=-xr1G -V0`, against the
   runtime's terabyte reservation and its interval timer. GHC calls
   and returns by jumping, so its origins have no callers, and a
