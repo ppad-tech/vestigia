@@ -69,6 +69,7 @@ data Opts = Opts {
   , oDesigned :: ![FilePath]
   , oContract :: !(Maybe T.Text)
   , oObjdump :: !(Maybe FilePath)
+  , oWatch :: !(Maybe FilePath)
   }
 
 main :: IO ()
@@ -82,6 +83,10 @@ main = do
     ("read" : rest) -> case options rest of
       Right (o, runs@(_ : _)) -> readRuns o runs
       Right _ -> usage "read: a run or memcheck XML file expected"
+      Left e -> usage e
+    ("watch" : rest) -> case options rest of
+      Right (o, prog : progArgs) -> watch o prog progArgs
+      Right (_, []) -> usage "watch: no program given"
       Left e -> usage e
     ("record" : rest) -> case options rest of
       Right (o, prog : progArgs) -> record o prog progArgs
@@ -103,8 +108,10 @@ usage e = do
       \[--object TEXT]... -- PROGRAM [ARG...]"
     , "  vestigia read [--out FILE] [--object TEXT]... RUN..."
     , "  vestigia record [--qemu PATH] [--plugin PATH] --dump FILE \
-      \[--contract NAME [--objdump PATH] [--object TEXT]...] \
-      \-- PROGRAM [ARG...]"
+      \[--contract NAME [--watch FILE | [--objdump PATH] \
+      \[--object TEXT]...]] -- PROGRAM [ARG...]"
+    , "  vestigia watch [--qemu PATH] [--out FILE] --contract NAME \
+      \[--objdump PATH] [--object TEXT]... -- PROGRAM [ARG...]"
     , "  vestigia diff [--out FILE] [--addr2line PATH] \
       \[--object TEXT]... [--control DUMP]... [--designed DUMP]... \
       \DUMP DUMP..."
@@ -128,7 +135,9 @@ usage e = do
     , "the program loads whose path contains an --object TEXT (all,"
     , "with none), read with objdump (--objdump, else"
     , "$VESTIGIA_OBJDUMP, else llvm-objdump); diff reports those whose"
-    , "operands differed beside the origins."
+    , "operands differed beside the origins. watch writes the list of"
+    , "those instructions once, for record --watch to read in runs of"
+    , "one program rather than make anew in each."
     , "--object keeps origins in objects whose path contains TEXT;"
     , "--control names a run repeating the first run's secret, and"
     , "what differs in it is unsteady, not an origin."
@@ -142,7 +151,7 @@ usage e = do
 -- options before the program; "--" ends them
 options :: [String] -> Either String (Opts, [String])
 options = go (Opts Nothing Nothing Nothing Nothing Nothing Nothing
-              Nothing [] [] [] Nothing Nothing)
+              Nothing [] [] [] Nothing Nothing Nothing)
   where
     go o xs = case xs of
       ("--" : rest) -> Right (o, rest)
@@ -161,6 +170,7 @@ options = go (Opts Nothing Nothing Nothing Nothing Nothing Nothing
         go o { oDesigned = oDesigned o <> [ p ] } rest
       ("--contract" : c : rest) -> go o { oContract = Just (T.pack c) } rest
       ("--objdump" : p : rest) -> go o { oObjdump = Just p } rest
+      ("--watch" : p : rest) -> go o { oWatch = Just p } rest
       (x : _) | take 2 x == "--" -> Left ("unknown option: " <> x)
       _ -> Right (o, xs)
 
@@ -321,15 +331,22 @@ record o prog progArgs = do
     ("qemu-" <> isa)
   plugin <- tool (oPlugin o) "VESTIGIA_PLUGIN" "libvestigia-qemu.so"
   -- under a contract, the instructions outside it in the objects
-  -- under audit, for the plugin to watch
-  contract <- traverse (\name -> case readContract name of
-      Just c | contractIsa c == isa -> pure c
-             | otherwise -> refuseRecord (T.unpack name <> " speaks to "
-                 <> contractIsa c <> ", and " <> prog <> " is " <> isa)
-      Nothing -> refuseRecord ("no contract named " <> T.unpack name
-        <> "; arm-dit and intel-doitm are known"))
-    (oContract o)
-  watch <- traverse (\c -> watchList o qemu c prog progArgs) contract
+  -- under audit, for the plugin to watch: the list given, made once
+  -- for runs of one program, or one made here
+  contract <- traverse (contractFor isa prog) (oContract o)
+  watching <- case (contract, oWatch o) of
+    (Just _, Just w) -> pure (Just (w, False))
+    (Just c, Nothing) -> do
+      t <- watchList o qemu c prog progArgs
+      tmp <- getTemporaryDirectory
+      (path, h) <- openTempFile tmp "vestigia.watch"
+      hClose h
+      TIO.writeFile path t
+      pure (Just (path, True))
+    (Nothing, Just _) -> refuseRecord "a watch list is read under the \
+      \contract it was made for: --watch needs --contract"
+    (Nothing, Nothing) -> pure Nothing
+  let watchFile = fmap fst watching
   -- QEMU maps the guest's libraries and heap in its own address
   -- space, wherever its own allocations leave room, and those vary
   -- with how its threads run: a second malloc arena, or a large block
@@ -350,12 +367,12 @@ record o prog progArgs = do
          ((proc qemu (guest
                      <> [ "-seed", "0"
                         , "-plugin", plugin <> ",out=" <> dump
-                            <> maybe "" (",watch=" <>) watch
+                            <> maybe "" (",watch=" <>) watchFile
                         , prog ]
                      <> progArgs))
             { P.env = Just ((tunables, host) : others) })
          (\_ _ _ ph -> waitForProcess ph))
-  for_ watch removeFile
+  for_ watching (\(w, made) -> when made (removeFile w))
   case r of
     Left e -> do
       hPutStrLn stderr ("vestigia: cannot run " <> qemu <> ": "
@@ -374,12 +391,33 @@ refuseRecord e = do
   hPutStrLn stderr ("vestigia: " <> e)
   exitWith (ExitFailure 2)
 
--- the plugin's watch list under a contract, written to a temporary
--- file: every instruction outside it in the objects the program loads
--- (and the program's own) whose path contains an --object text, all
--- of them with none
+-- the contract named, for a program of the ISA it speaks to
+contractFor :: String -> FilePath -> T.Text -> IO Contract
+contractFor isa prog name = case readContract name of
+  Just c | contractIsa c == isa -> pure c
+         | otherwise -> refuseRecord (T.unpack name <> " speaks to "
+             <> contractIsa c <> ", and " <> prog <> " is " <> isa)
+  Nothing -> refuseRecord ("no contract named " <> T.unpack name
+    <> "; arm-dit and intel-doitm are known")
+
+-- write a program's watch list under a contract, once, for runs of
+-- it to read (record --watch)
+watch :: Opts -> FilePath -> [String] -> IO ()
+watch o prog progArgs = do
+  isa <- machineOf prog
+  qemu <- tool (oQemu o) ("VESTIGIA_QEMU_" <> fmap toUpper isa)
+    ("qemu-" <> isa)
+  name <- maybe (usage "watch: --contract NAME is needed") pure
+    (oContract o)
+  c <- contractFor isa prog name
+  t <- watchList o qemu c prog progArgs
+  maybe (TIO.putStr t) (\p -> TIO.writeFile p t) (oOut o)
+
+-- the plugin's watch list under a contract: every instruction outside
+-- it in the objects the program loads (and the program's own) whose
+-- path contains an --object text, all of them with none
 watchList :: Opts -> FilePath -> Contract -> FilePath -> [String]
-          -> IO FilePath
+          -> IO T.Text
 watchList o qemu c prog progArgs = do
   objdump <- tool (oObjdump o) "VESTIGIA_OBJDUMP" "llvm-objdump"
   loaded <- loadedObjects qemu prog progArgs
@@ -391,11 +429,7 @@ watchList o qemu c prog progArgs = do
       ls <- disassemble objdump c p
       pure (watchSection c p ls))
     kept
-  tmp <- getTemporaryDirectory
-  (path, h) <- openTempFile tmp "vestigia.watch"
-  hClose h
-  TIO.writeFile path (T.concat sections)
-  pure path
+  pure (T.concat sections)
 
 -- the shared objects a program loads, as its dynamic loader resolves
 -- them, run under QEMU so that any ISA's are found

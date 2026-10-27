@@ -139,7 +139,10 @@ contract says nothing of its time either way, so it qualifies a
 clean report rather than failing it. The report names the contract
 and the ISA, and how many instructions outside the contract ran.
 Runs compared must have been recorded under the same contract. A
-division is an operand origin, as without a contract.
+division is an operand origin, as without a contract. Making the list
+reads every object under audit, so runs of one program can share it:
+`vestigia watch` writes it once, and `record --contract NAME --watch
+FILE` reads it.
 
 ### As derivations
 
