@@ -2,7 +2,9 @@
 # site and origin it should show found where it should be, and
 # nothing else in the harness. On an x86_64 host, the same harness
 # built for aarch64 is traced differentially too, under QEMU; memcheck
-# needs a native host.
+# needs a native host. Each differential trace is repeated under its
+# ISA's data-independent-timing contract, which finds the floating-
+# point division outside it and changes no origin.
 { pkgs, vestigia }:
 
 let
@@ -41,13 +43,16 @@ let
     inherit objects;
   };
 
-  diffOf = name: harness: vestigia.diffOf {
-    inherit name objects;
+  diffOf = name: harness: contract: vestigia.diffOf {
+    inherit name objects contract;
     harness = "${harness}/bin/probe";
     runs = map (s: [ s ]) secrets;
   };
-  diff = diffOf "probe" probe;
-  diffCross = diffOf "probe-aarch64" cross;
+  native = if x86_64 then "intel-doitm" else "arm-dit";
+  diff = diffOf "probe" probe null;
+  diffCross = diffOf "probe-aarch64" cross null;
+  diffContract = diffOf "probe-contract" probe native;
+  diffCrossContract = diffOf "probe-aarch64-contract" cross "arm-dit";
 
   # each report's (class, function) pairs in the harness, sorted
   expected = {
@@ -96,6 +101,27 @@ pkgs.runCommand "vestigia-probe-check" {
     check ${diffCross}/diff.json \
       '[.origins[] | [.class, .frames[0].function]] | unique' \
       '${builtins.toJSON expected.diff}'
+  ''}
+
+  # under a contract, the floating-point division is outside it, and
+  # the origins are those found without one
+  for d in ${diffContract} ${lib.optionalString x86_64
+             "${diffCrossContract}"}; do
+    check $d/diff.json '[.outside[] | .frames[0].function] | unique' \
+      '["fpdivide"]'
+    check $d/diff.json \
+      '[.origins[] | [.class, .frames[0].function]] | unique' \
+      '${builtins.toJSON expected.diff}'
+    check $d/diff.json '.summary.watched > 0' 'true'
+    check $d/diff.json '[.outside[] | .instruction | type] | unique' \
+      '["string"]'
+  done
+  check ${diffContract}/diff.json '[.contract.name, .isa]' \
+    '${builtins.toJSON [ native (if x86_64 then "x86_64" else "aarch64") ]}'
+  check ${diff}/diff.json '.contract' 'null'
+  ${lib.optionalString x86_64 ''
+    check ${diffCrossContract}/diff.json '[.contract.name, .isa]' \
+      '["arm-dit","aarch64"]'
   ''}
 
   # each origin's stack runs from its own function to the call in

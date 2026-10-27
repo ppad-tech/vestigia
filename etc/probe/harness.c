@@ -8,8 +8,10 @@
  * Its secret, the first argument in hex (of one width for every
  * secret, so that runs lay out alike), reaches a loop's bound, a
  * table index, which of two calls a helper returns to, a dividend,
- * a divisor, and, on a path the third secret alone takes, another
- * table index; a constant-time select reaches none of them.
+ * a divisor, a floating-point division (outside either ISA's
+ * data-independent-timing contract), and, on a path the third secret
+ * alone takes, another table index; a constant-time select reaches
+ * none of them.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,6 +74,12 @@ __attribute__((noinline)) unsigned divide_memory(unsigned s) {
 #endif
 }
 
+/* a secret divided in floating point, which neither Arm's DIT nor
+   Intel's DOITM covers */
+__attribute__((noinline)) unsigned fpdivide(unsigned s) {
+  return (unsigned)((double)s / 7.0);
+}
+
 /* a table index on a path one secret takes */
 __attribute__((noinline)) unsigned rare(unsigned s) {
   if ((s & 0xffu) == 0xc3u) return table[(s >> 1) & 0xffu];
@@ -85,7 +93,7 @@ __attribute__((noinline)) unsigned ct(unsigned s, unsigned p) {
 
 int main(int argc, char **argv) {
   unsigned s = (unsigned)strtoul(argc > 1 ? argv[1] : "0", NULL, 16);
-  unsigned out[7];
+  unsigned out[8];
   for (int i = 0; i < 256; i++) table[i] = (unsigned char)i;
   vestigia_secret(&s, sizeof s);
   out[0] = branchy(s);
@@ -95,8 +103,9 @@ int main(int argc, char **argv) {
   out[4] = divide_memory(s);
   out[5] = rare(s);
   out[6] = ct(s, 1);
+  out[7] = fpdivide(s);
   vestigia_public(out, sizeof out);
-  printf("%u %u %u %u %u %u %u\n", out[0], out[1], out[2], out[3],
-         out[4], out[5], out[6]);
+  printf("%u %u %u %u %u %u %u %u\n", out[0], out[1], out[2], out[3],
+         out[4], out[5], out[6], out[7]);
   return 0;
 }
