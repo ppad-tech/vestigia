@@ -1,5 +1,22 @@
 # Changelog
 
+- 0.2.0 (unreleased)
+  * Data-independent-timing contracts: `record --contract arm-dit`
+    or `intel-doitm`, with `--object` and `--objdump`, has the plugin
+    fingerprint the operands of every instruction outside the ISA's
+    contract in the objects named, as it does a division's. The
+    tables are transcribed from the vendors' statements: Arm's A64
+    ISA XML (2022-12), every encoding with its source registers, and
+    Intel's list 768547 (2026-02-23).
+  * `diff` reports such an instruction on other operands under
+    `outside`, apart from the origins, with its text, and how many
+    ran (vestigia/diff-v4, which also names the ISA and contract, and
+    gives an operand origin its text where the watch list named it).
+    Runs recorded under other contracts are refused.
+  * `record` appends the guest's ISA to its dump.
+  * `diffOf` takes a `contract`; the command finds LLVM's
+    `llvm-objdump` through `$VESTIGIA_OBJDUMP`.
+
 - 0.1.0 (2026-10-22)
   * Initial version, with two instruments over a harness that marks
     its secret (`vestigia.h`, defined by `vestigia.c`, which serves

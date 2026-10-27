@@ -12,6 +12,7 @@ import qualified Data.Text.Encoding as TE
 import Test.Tasty
 import Test.Tasty.HUnit
 
+import Vestigia.Contract
 import Vestigia.Diff
 import Vestigia.Json
 import Vestigia.Memcheck
@@ -24,6 +25,7 @@ main = defaultMain $ testGroup "vestigia"
   [ xmlTests
   , memcheckTests
   , traceTests
+  , contractTests
   , diffTests
   , symbolTests
   , jsonTests
@@ -141,6 +143,94 @@ traceTests = testGroup "trace"
         @?= [ (Control, Just 0x10, 5 + 7, [ 0, 1 ], 1 + 2) ]
       fmap fst (trUnrelated tr) @?= [ 0 ]
   ]
+
+contractTests :: TestTree
+contractTests = testGroup "contract"
+  [ testCase "AArch64: a division, and what DIT covers" $ do
+      classify ArmDit (word 0x1ac20820) @?= Division        -- udiv w0
+      classify ArmDit (word 0x9ac20c20) @?= Division        -- sdiv x0
+      classify ArmDit (word 0x8b020020) @?= Inside          -- add x0
+      classify ArmDit (word 0x9bc27c20) @?= Inside          -- umulh x0
+      classify ArmDit (word 0xdac00c20) @?= Inside          -- rev x0
+      classify ArmDit (word 0xd65f03c0) @?= Excluded        -- ret
+      classify ArmDit (word 0x90000420) @?= Excluded        -- adrp x0
+
+  , testCase "AArch64: outside DIT, with the registers read" $ do
+      -- fdiv d0, d1, d2
+      classify ArmDit (word 0x1e621820)
+        @?= Watched [ Register "v1" 0 64, Register "v2" 0 64 ] False
+      -- fmov x0, d1
+      classify ArmDit (word 0x9e660020)
+        @?= Watched [ Register "v1" 0 64 ] False
+      -- fadd v0.4s, v1.4s, v2.4s, and its 64-bit arrangement
+      classify ArmDit (word 0x4e22d420)
+        @?= Watched [ Register "v1" 0 128, Register "v2" 0 128 ] False
+      classify ArmDit (word 0x0e22d420)
+        @?= Watched [ Register "v1" 0 64, Register "v2" 0 64 ] False
+
+  , testCase "x86_64: a division, and what DOITM covers" $ do
+      classify IntelDoitm (x86 [ 0x48, 0xf7, 0xf6 ] "div" "rsi")
+        @?= Division
+      classify IntelDoitm (x86 [ 0xc1, 0xc0, 0x07 ] "rol" "eax, 0x7")
+        @?= Inside
+      classify IntelDoitm (x86 [ 0x48, 0x0f, 0xc8 ] "bswap" "rax")
+        @?= Inside
+      classify IntelDoitm (x86 [ 0x48, 0x0f, 0x44, 0xc3 ] "cmove"
+                             "rax, rbx") @?= Inside
+      classify IntelDoitm (x86 [ 0x48, 0xb8, 1, 0, 0, 0, 0, 0, 0, 0 ]
+                             "movabs" "rax, 0x1") @?= Inside
+      classify IntelDoitm (x86 [ 0xc5, 0xf5, 0xd4, 0xc2 ] "vpaddq"
+                             "ymm0, ymm1, ymm2") @?= Inside
+      classify IntelDoitm (x86 [ 0x75, 0x02 ] "jne" "0x10") @?= Excluded
+      classify IntelDoitm (x86 [ 0x90 ] "nop" "") @?= Excluded
+
+  , testCase "x86_64: outside DOITM, with the registers read" $ do
+      -- popcnt only writes its destination
+      classify IntelDoitm (x86 [ 0xf3, 0x48, 0x0f, 0xb8, 0xc3 ] "popcnt"
+                             "rax, rbx")
+        @?= Watched [ Register "rbx" 0 64 ] False
+      classify IntelDoitm (x86 [ 0x92 ] "xchg" "eax, edx")
+        @?= Watched [ Register "rax" 0 32, Register "rdx" 0 32 ] False
+      -- a legacy SSE division reads its destination too
+      classify IntelDoitm (x86 [ 0xf2, 0x0f, 0x5e, 0xc1 ] "divsd"
+                             "xmm0, xmm1")
+        @?= Watched [ Register "xmm0" 0 128, Register "xmm1" 0 128 ] False
+      classify IntelDoitm (x86 [ 0x98 ] "cwde" "")
+        @?= Watched [ Register "rax" 0 16 ] False
+      -- a memory operand's registers are its address's, not its data
+      classify IntelDoitm (x86 [ 0x0f, 0x54, 0x07 ] "andps"
+                             "xmm0, xmmword ptr [rdi]")
+        @?= Watched [ Register "xmm0" 0 128 ] True
+
+  , testCase "llvm-objdump's lines are read" $ do
+      readDisassembly (T.unlines
+        [ "0000000000001000 <f>:"
+        , "    1000: 48 89 e5                     \tmov\trbp, rsp"
+        , "    1003: f3 48 ab                     \trep\t\tstosq\tqword \
+          \ptr es:[rdi], rax"
+        , "    1006: 48 8b 05 4d b5 06 00         \tmov\trax, qword ptr \
+          \[rip + 0x6b54d] # 0x86d58 <x>"
+        , "\t\t..."
+        , "   1b824: 9112a000     \tadd\tx0, x0, #0x4a8" ])
+        @?= [ Line 0x1000 [ 0x48, 0x89, 0xe5 ] [] "mov" "rbp, rsp"
+            , Line 0x1003 [ 0xf3, 0x48, 0xab ] [ "rep" ] "stosq"
+                "qword ptr es:[rdi], rax"
+            , Line 0x1006 [ 0x48, 0x8b, 0x05, 0x4d, 0xb5, 0x06, 0x00 ] []
+                "mov" "rax, qword ptr [rip + 0x6b54d]"
+            , Line 0x1b824 [ 0x9112a000 ] [] "add" "x0, x0, #0x4a8" ]
+
+  , testCase "the watch list names what lies outside" $
+      watchSection IntelDoitm "/lib.so"
+        [ x86 [ 0x48, 0xf7, 0xf6 ] "div" "rsi"
+        , x86 [ 0x48, 0x01, 0xd8 ] "add" "rax, rbx"
+        , x86 [ 0x92 ] "xchg" "eax, edx" ]
+        @?= T.unlines
+              [ "O /lib.so", "D 0 div rsi"
+              , "U 0 0 2 rax:0:32 rdx:0:32 xchg eax, edx" ]
+  ]
+  where
+    word w = Line 0 [ w ] [] "" ""
+    x86 bs m ops = Line 0 bs [] m ops
 
 diffTests :: TestTree
 diffTests = testGroup "diff"
@@ -298,6 +388,36 @@ diffTests = testGroup "diff"
         [ x ])) @?= []
       -- a control dividing other operands sets it apart as unsteady
       fmap inPc (dvUnsteady (diffControlled [ x ] [ a, b ])) @?= [ 0x40 ]
+
+  , testCase "an instruction outside the contract is reported apart" $ do
+      -- 0x40 runs once in every run, outside the contract, on other
+      -- operands in B; 0x30 is watched too, on the same operands
+      let under d = d <> "U 30 7777\nW 30 popcnt rax, rbx\nU 40 "
+      a <- either assertFailure pure
+        (readDump (under dumpA <> "1111\nM x86_64\nG intel-doitm\n"))
+      b <- either assertFailure pure
+        (readDump (under dumpB <> "2222\nM x86_64\nG intel-doitm\n"))
+      x <- either assertFailure pure
+        (readDump (under dumpA <> "3333\nM x86_64\nG intel-doitm\n"))
+      dpIsa a @?= Just "x86_64"
+      dpContract a @?= Just "intel-doitm"
+      M.lookup 0x30 (dpTexts a) @?= Just "popcnt rax, rbx"
+      let dv = diffDumps [ a, b ]
+      -- not an origin: the contract says nothing either way of it
+      fmap (\(o, i) -> (o, inPc i)) (dvOrigins dv)
+        @?= [ (ControlOrigin, 0x10), (AddressOrigin, 0x20) ]
+      fmap inPc (dvOutside dv) @?= [ 0x40 ]
+      M.lookup 0x40 (dvOutsideBehaviour (diffDumps [ a, b, a ]))
+        @?= Just ([ [ 0, 2 ], [ 1 ] ], [])
+      dvWatched dv @?= M.fromList [ ("/lib.so", S.fromList [ 0x30, 0x40 ]) ]
+      notElem 0x40 (fmap inPc (dvDownstream dv)) @? "downstream"
+      -- runs alike in their operands show nothing outside
+      dvOutside (diffDumps [ a, a ]) @?= []
+      -- a control on other operands sets it apart as unsteady
+      dvOutside (diffControlled [ x ] [ a, b ]) @?= []
+      fmap inPc (dvUnsteady (diffControlled [ x ] [ a, b ])) @?= [ 0x40 ]
+      -- and the objects kept are the objects reported
+      dvOutside (restrictTo [ "/other.so" ] dv) @?= []
 
   , testCase "an origin is given the calls that reached it" $ do
       -- 0x10 ran in context 2 (the call at 0x40 made in context 1,

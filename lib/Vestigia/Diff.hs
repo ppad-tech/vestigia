@@ -63,6 +63,13 @@
 -- runs that never reached it. Whether two runs
 -- that differed there both had their secrets accepted is the
 -- reader's to say, from what each run returned.
+--
+-- Runs recorded under a data-independent-timing contract
+-- (Vestigia.Contract) also fingerprint the operands of every
+-- instruction outside it. One run equally often on other operands
+-- in some declared run is outside the contract on the secret: not an
+-- origin, since the contract says nothing either way of its time,
+-- but reported beside them, as is how many such instructions ran.
 
 module Vestigia.Diff (
     Insn(..)
@@ -96,6 +103,7 @@ import qualified Data.Text.Encoding.Error as TEE
 import Numeric (readHex, showHex)
 import Text.Read (readMaybe)
 
+import Vestigia.Contract (contractSource, readContract)
 import Vestigia.Json
 import Vestigia.Symbol (Place(..))
 
@@ -137,6 +145,15 @@ data Dump = Dump {
   , dpContexts :: !(M.Map Integer (Integer, Integer))
   , dpCallers :: !(M.Map Integer (Bool, [Integer]))
   , dpRun :: !(Maybe Run)
+    -- | the operands, fingerprinted, of the instructions outside the
+    --   contract the run was recorded under
+  , dpOutside :: !(M.Map Integer T.Text)
+    -- | the text of each instruction the watch list named
+  , dpTexts :: !(M.Map Integer T.Text)
+    -- | the guest's ISA, and the contract, as `vestigia record`
+    --   appends them
+  , dpIsa :: !(Maybe T.Text)
+  , dpContract :: !(Maybe T.Text)
   } deriving (Eq, Show)
 
 -- | Read a plugin dump. A dump in which no instruction ran records
@@ -147,11 +164,13 @@ data Dump = Dump {
 --   program's own. The record `vestigia record` appends (an @A@ line
 --   per argument, its bytes in hex; @N@, the environment's variables
 --   and bytes, in hex; @X@, the exit status, in decimal) is read
---   whole or not at all.
+--   whole or not at all. Beside it, @M@ names the guest's ISA and @G@
+--   the contract the run was recorded under.
 readDump :: T.Text -> Either String Dump
 readDump t = do
   d <- foldM line (Dump M.empty M.empty S.empty M.empty M.empty M.empty
-                     Nothing, [], Nothing, Nothing) (T.lines t)
+                     Nothing M.empty M.empty Nothing Nothing, [], Nothing
+                  , Nothing) (T.lines t)
   let (dump, as, env, st) = d
       cx = dpContexts dump
   unless (any ((> 0) . inCount) (M.elems (dpInsns dump))) $
@@ -187,6 +206,16 @@ readDump t = do
         k <- unhex pc
         pure (d { dpOperands = M.insert k fp (dpOperands d) }, as, env
              , st)
+      [ "U", pc, fp ] -> do
+        k <- unhex pc
+        pure (d { dpOutside = M.insert k fp (dpOutside d) }, as, env
+             , st)
+      ("W" : pc : text@(_ : _)) -> do
+        k <- unhex pc
+        pure (d { dpTexts = M.insert k (T.unwords text) (dpTexts d) }, as
+             , env, st)
+      [ "M", isa ] -> pure (d { dpIsa = Just isa }, as, env, st)
+      [ "G", c ] -> pure (d { dpContract = Just c }, as, env, st)
       [ "C", c, caller, call ] -> do
         v <- (,) <$> unhex caller <*> unhex call
         k <- unhex c
@@ -324,6 +353,20 @@ data Divergence = Divergence {
     --   in the declared and designed runs, at most 16 of them, and
     --   whether there were more than those
   , dvCallers :: !(M.Map Integer ([[(Maybe T.Text, Integer)]], Bool))
+    -- | the instructions outside the contract run equally often in
+    --   every declared run, on other operands in one, each with the
+    --   runs alike there and those that never ran it
+  , dvOutside :: ![Insn]
+  , dvOutsideBehaviour :: !(M.Map Integer ([[Int]], [Int]))
+    -- | the instructions outside the contract some run executed, by
+    --   object
+  , dvWatched :: !(M.Map T.Text (S.Set Integer))
+    -- | the text of each instruction the watch list named
+  , dvTexts :: !(M.Map Integer T.Text)
+    -- | the guest's ISA and the contract, as the declared runs name
+    --   them
+  , dvIsa :: !(Maybe T.Text)
+  , dvContract :: !(Maybe T.Text)
   } deriving (Eq, Show)
 
 -- | Compare runs, uncontrolled.
@@ -361,9 +404,36 @@ diffDesigned cs ds xs = Divergence {
       , inCount i > 0
       , Just obj <- [ inObject i ] ]
   , dvCallers = M.fromList
-      [ (inPc i, callersAt (inPc i)) | (_, i) <- origins ]
+      [ (inPc i, callersAt (inPc i))
+      | i <- fmap snd origins <> outside ]
+  , dvOutside = outside
+  , dvOutsideBehaviour = M.fromList
+      [ ( inPc i
+        , ( classes (==) [ (k, M.lookup (inPc i) (dpOutside d))
+                         | (k, d) <- ranIn' ds (inPc i) ]
+          , [ k | (k, d) <- zip [ 0 .. ] ds
+                , maybe True ((== 0) . inCount)
+                    (M.lookup (inPc i) (dpInsns d)) ] ) )
+      | i <- outside ]
+  , dvWatched = M.fromListWith S.union
+      [ (obj, S.singleton (inOffset i))
+      | d <- ds <> xs <> cs
+      , pc <- M.keys (dpOutside d)
+      , Just i <- [ M.lookup pc (dpInsns d) ]
+      , inCount i > 0
+      , Just obj <- [ inObject i ] ]
+  , dvTexts = M.unions (fmap dpTexts (ds <> xs <> cs))
+  , dvIsa = case ds of
+      (d : _) -> dpIsa d
+      [] -> Nothing
+  , dvContract = case ds of
+      (d : _) -> dpContract d
+      [] -> Nothing
   }
   where
+    ranIn' rs pc = [ (k, d) | (k, d) <- zip [ 0 .. ] rs
+                            , Just i <- [ M.lookup pc (dpInsns d) ]
+                            , inCount i > 0 ]
     callersAt pc =
       let found = [ (partial, fmap (callsOf d) ks)
                   | d <- runs
@@ -384,7 +454,8 @@ diffDesigned cs ds xs = Divergence {
             ta = M.lookup pc (dpTransfers a)
             tb = M.lookup pc (dpTransfers b)
       , fmap sig ia /= fmap sig ib || ta /= tb
-          || M.lookup pc (dpOperands a) /= M.lookup pc (dpOperands b) ]
+          || M.lookup pc (dpOperands a) /= M.lookup pc (dpOperands b)
+          || M.lookup pc (dpOutside a) /= M.lookup pc (dpOutside b) ]
     sig i = (inCount i, inFingerprint i, inOrder i)
 
     origins = [ o | o@(_, i) <- controls <> addresses <> operands
@@ -467,10 +538,11 @@ diffDesigned cs ds xs = Divergence {
     -- the address and operand origins
     dataPcs = S.fromList [ inPc i | (_, i) <- addresses <> operands ]
     downstream =
-      (((pcs `S.difference` steady)
-         `S.union` (divergentPcs `S.intersection` returns))
-         `S.difference` controlPcs)
-      `S.difference` dataPcs
+      ((((pcs `S.difference` steady)
+          `S.union` (divergentPcs `S.intersection` returns))
+          `S.difference` controlPcs)
+        `S.difference` dataPcs)
+      `S.difference` S.fromList (fmap inPc outside)
 
     controls =
       [ (ControlOrigin, i)
@@ -485,6 +557,20 @@ diffDesigned cs ds xs = Divergence {
       , not (alike fps)
       , Just i <- [ firstInsn pc ]
       , inAccesses i > 0 ]
+
+    -- an instruction outside the contract run equally often in
+    -- every declared run, on other operands in one, where it is not
+    -- an origin already
+    outside =
+      [ i
+      | pc <- S.toAscList steadyDeclared
+      , not (pc `S.member` unsteady)
+      , not (pc `S.member` controlPcs)
+      , not (pc `S.member` dataPcs)
+      , let fps = [ M.lookup pc (dpOutside d) | d <- ds ]
+      , any (/= Nothing) fps
+      , not (alike fps)
+      , Just i <- [ firstInsn pc ] ]
 
     -- a division run equally often in every declared run, on other
     -- operands in one
@@ -506,6 +592,9 @@ restrictTo ps dv
       , dvDownstream = filter (inside . inObject) (dvDownstream dv)
       , dvExecuted = M.filterWithKey (\o _ -> inside (Just o))
           (dvExecuted dv)
+      , dvOutside = filter (inside . inObject) (dvOutside dv)
+      , dvWatched = M.filterWithKey (\o _ -> inside (Just o))
+          (dvWatched dv)
       }
   where
     inside mo = case mo of
@@ -518,19 +607,29 @@ originText o = case o of
   AddressOrigin -> "address"
   OperandOrigin -> "operand"
 
--- | The report: @vestigia/diff-v3@. Runs are given the declared,
+-- | The report: @vestigia/diff-v4@. Runs are given the declared,
 --   then the designed, then the controls, and an origin names the
 --   runs alike at it by the first two. An origin's stacks are its own
 --   frames then its calls', innermost first, each frame with the
 --   object and address of the instruction it names, as memcheck's
---   are in a taint report.
+--   are in a taint report. The ISA and contract the runs were
+--   recorded under head it; the instructions outside the contract
+--   whose operands differed are given as origins are, and those that
+--   ran, by object, as what was executed is.
 divergenceJson
   :: T.Text -> [Named] -> M.Map (T.Text, Integer) [Place] -> Divergence
   -> Value
 divergenceJson version runs places dv = Object
-  [ ("schema", String "vestigia/diff-v3")
+  [ ("schema", String "vestigia/diff-v4")
   , ("tool", Object [ ("name", String "vestigia")
                     , ("version", String version) ])
+  , ("isa", maybe Null String (dvIsa dv))
+  , ("contract", case dvContract dv of
+      Just n -> Object
+        [ ("name", String n)
+        , ("source", maybe Null (String . contractSource)
+            (readContract n)) ]
+      Nothing -> Null)
   , ("runs", Array
       [ Object
           [ ("name", String (nmName r))
@@ -547,28 +646,18 @@ divergenceJson version runs places dv = Object
       , ("operand", count OperandOrigin)
       , ("downstream", Number (toInteger (length (dvDownstream dv))))
       , ("unsteady", Number (toInteger (length (dvUnsteady dv))))
+      , ("outside", Number (toInteger (length (dvOutside dv))))
+      , ("watched", Number (toInteger (sum (fmap S.size
+          (M.elems (dvWatched dv))))))
       ])
   , ("origins", Array
-      [ Object $
-          [ ("class", String (originText o))
-          , ("pc", String (hex (inPc i)))
-          , ("object", maybe Null String (inObject i))
-          , ("offset", String (hex (inOffset i)))
-          , ("count", Number (inCount i))
-          , ("frames", Array (fmap placeJson (placesOf i)))
-          , ("stacks", Array
-              [ Array (located (inObject i, inOffset i)
-                         <> concatMap located calls)
-              | calls <- stacks ])
-          , ("partial", Bool partial)
-          , ("groups", Array (fmap (Array . fmap named) groups))
-          , ("absent", Array (fmap named absent))
-          ]
-      | (o, i) <- dvOrigins dv
-      , let (groups, absent) = M.findWithDefault ([], []) (o, inPc i)
-              (dvBehaviour dv)
-            (stacks, partial) = M.findWithDefault ([], False) (inPc i)
-              (dvCallers dv) ])
+      [ site (originText o) i
+          (M.findWithDefault ([], []) (o, inPc i) (dvBehaviour dv))
+      | (o, i) <- dvOrigins dv ])
+  , ("outside", Array
+      [ site "outside" i
+          (M.findWithDefault ([], []) (inPc i) (dvOutsideBehaviour dv))
+      | i <- dvOutside dv ])
   , ("downstream", Object
       [ (obj, Array (fmap (String . hex) (S.toAscList offs)))
       | (obj, offs) <- M.toList (M.fromListWith S.union
@@ -578,8 +667,31 @@ divergenceJson version runs places dv = Object
   , ("executed", Object
       [ (o, Array (fmap (String . hex) (S.toAscList xs)))
       | (o, xs) <- M.toList (dvExecuted dv) ])
+  , ("watched", Object
+      [ (o, Array (fmap (String . hex) (S.toAscList xs)))
+      | (o, xs) <- M.toList (dvWatched dv) ])
   ]
   where
+    site cls i (groups, absent) =
+      let (stacks, partial) = M.findWithDefault ([], False) (inPc i)
+            (dvCallers dv)
+      in Object
+           [ ("class", String cls)
+           , ("pc", String (hex (inPc i)))
+           , ("object", maybe Null String (inObject i))
+           , ("offset", String (hex (inOffset i)))
+           , ("count", Number (inCount i))
+           , ("instruction", maybe Null String
+               (M.lookup (inPc i) (dvTexts dv)))
+           , ("frames", Array (fmap placeJson (placesOf i)))
+           , ("stacks", Array
+               [ Array (located (inObject i, inOffset i)
+                          <> concatMap located calls)
+               | calls <- stacks ])
+           , ("partial", Bool partial)
+           , ("groups", Array (fmap (Array . fmap named) groups))
+           , ("absent", Array (fmap named absent))
+           ]
     names = [ nmName r | r <- runs, nmKind r /= ControlRun ]
     kindText k = case k of
       DeclaredRun -> "declared"
@@ -623,12 +735,13 @@ divergenceSummary
   :: M.Map (T.Text, Integer) [Place] -> Divergence -> T.Text
 divergenceSummary places dv = T.unlines $
   [ T.intercalate "  "
-      [ originText o
+      [ cls
       , hex (inOffset i)
       , maybe "?" id (plFunction =<< innermost i)
       , maybe "?" location (innermost i)
       , maybe "-" base (inObject i) ]
-  | (o, i) <- dvOrigins dv ]
+  | (cls, i) <- [ (originText o, i) | (o, i) <- dvOrigins dv ]
+                  <> [ ("outside", i) | i <- dvOutside dv ] ]
   <> [ T.pack (show (length (dvOrigins dv))) <> " origin(s) over "
        <> T.pack (show (dvRuns dv)) <> " run(s)"
        <> (if dvDesigned dv == 0 then ""
@@ -638,8 +751,15 @@ divergenceSummary places dv = T.unlines $
        <> " instruction(s) downstream; "
        <> T.pack (show (length (dvUnsteady dv)))
        <> " unsteady over " <> T.pack (show (dvControls dv))
-       <> " control(s)" ]
+       <> " control(s)"
+       <> maybe ""
+            (\c -> "; " <> T.pack (show watched)
+               <> " instruction(s) outside " <> c <> " ran, "
+               <> T.pack (show (length (dvOutside dv)))
+               <> " on operands that differed")
+            (dvContract dv) ]
   where
+    watched = sum (fmap S.size (M.elems (dvWatched dv)))
     innermost i = case inObject i of
       Just obj -> case M.findWithDefault [] (obj, inOffset i) places of
         (p : _) -> Just p

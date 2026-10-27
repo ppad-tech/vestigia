@@ -67,6 +67,8 @@ let
         "${plugin}/lib/libvestigia-qemu.so"
         "--set-default VESTIGIA_ADDR2LINE"
         "${pkgs.llvm}/bin/llvm-addr2line"
+        "--set-default VESTIGIA_OBJDUMP"
+        "${pkgs.llvm}/bin/llvm-objdump"
       ])}
     ln -s ${include}/include $out/include
   '';
@@ -111,16 +113,26 @@ let
   # without the secret is set aside rather than taken for it.
   # `designed` runs, aimed at particular paths, are compared beside
   # them for control and coverage but not for addresses (vestigia
-  # diff --designed). A run's own failure leaves its status; a dump
-  # vestigia cannot read fails the build.
-  diffOf = { name, harness, runs, objects ? [ ], designed ? [ ] }:
+  # diff --designed). Under a `contract` (arm-dit or intel-doitm, the
+  # harness's ISA's), every run also fingerprints the operands of the
+  # instructions outside it in `objects` (vestigia record --contract).
+  # A run's own failure leaves its status; a dump vestigia cannot read
+  # fails the build.
+  diffOf = { name, harness, runs, objects ? [ ], designed ? [ ]
+           , contract ? null }:
+    let
+      watch = lib.optionalString (contract != null)
+        ("--contract ${lib.escapeShellArg contract} "
+          + lib.concatMapStrings (o: "--object ${lib.escapeShellArg o} ")
+              objects);
+    in
     pkgs.runCommand "vestigia-diff-${name}" { } ''
       mkdir -p $out
       start=$(date +%s%N)
       ${lib.concatImapStrings (k: args: ''
         set +e
         ${vestigia}/bin/vestigia record --dump $out/dump-${toString k} \
-          -- ${harness} ${lib.escapeShellArgs args} \
+          ${watch}-- ${harness} ${lib.escapeShellArgs args} \
           > $out/stdout-${toString k} 2> $out/stderr-${toString k}
         echo $? > $out/status-${toString k}
         set -e
@@ -128,7 +140,7 @@ let
         set +e
         ${vestigia}/bin/vestigia record \
           --dump $out/designed-${toString k} \
-          -- ${harness} ${lib.escapeShellArgs args} \
+          ${watch}-- ${harness} ${lib.escapeShellArgs args} \
           > $out/stdout-designed-${toString k} \
           2> $out/stderr-designed-${toString k}
         echo $? > $out/status-designed-${toString k}
@@ -136,7 +148,7 @@ let
       '') designed}
       set +e
       ${vestigia}/bin/vestigia record --dump $out/control-1 \
-        -- ${harness} ${lib.escapeShellArgs (builtins.head runs)} \
+        ${watch}-- ${harness} ${lib.escapeShellArgs (builtins.head runs)} \
         > $out/stdout-control-1 2> $out/stderr-control-1
       echo $? > $out/status-control-1
       set -e

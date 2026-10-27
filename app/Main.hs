@@ -15,6 +15,7 @@ module Main (
 
 import Control.Exception (IOException, try)
 import Control.Monad (unless, when)
+import qualified Data.List as L
 import qualified Data.ByteString as BS
 import Data.Char (toUpper)
 import qualified Data.Map.Strict as M
@@ -28,22 +29,26 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
 import qualified Data.Text.IO as TIO
 import System.Directory
-  (createDirectoryIfMissing, doesDirectoryExist, doesFileExist,
-   getTemporaryDirectory, removeFile)
+  (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist,
+   doesFileExist, getTemporaryDirectory, removeFile)
 import System.Environment (getArgs, getEnvironment, lookupEnv)
 import System.Exit (ExitCode(..), exitWith)
 import System.FilePath (takeFileName, (</>))
 import Text.Read (readMaybe)
 import System.IO
   (IOMode(..), hClose, hPutStrLn, openTempFile, stderr, withBinaryFile)
-import System.Process (proc, waitForProcess, withCreateProcess)
+import System.Process
+  (proc, readCreateProcessWithExitCode, waitForProcess, withCreateProcess)
 import qualified System.Process as P
 
 import Paths_vestigia (version)
+import Vestigia.Contract
+  (Contract(..), Line, contractIsa, contractName, readContract,
+   readDisassembly, watchSection)
 import Vestigia.Diff
   (Dump(..), Kind(..), Named(..), Run(..), diffDesigned, divergenceJson,
-   divergenceSummary, dvCallers, dvOrigins, inObject, inOffset, inPc,
-   layoutApart, readDump, restrictTo, runApart)
+   divergenceSummary, dvCallers, dvOrigins, dvOutside, inObject, inOffset,
+   inPc, layoutApart, readDump, restrictTo, runApart)
 import Vestigia.Json (encode)
 import Vestigia.Layout (fixLayout)
 import Vestigia.Memcheck (Memcheck, readMemcheck)
@@ -62,6 +67,8 @@ data Opts = Opts {
   , oObjects :: ![T.Text]
   , oControls :: ![FilePath]
   , oDesigned :: ![FilePath]
+  , oContract :: !(Maybe T.Text)
+  , oObjdump :: !(Maybe FilePath)
   }
 
 main :: IO ()
@@ -96,6 +103,7 @@ usage e = do
       \[--object TEXT]... -- PROGRAM [ARG...]"
     , "  vestigia read [--out FILE] [--object TEXT]... RUN..."
     , "  vestigia record [--qemu PATH] [--plugin PATH] --dump FILE \
+      \[--contract NAME [--objdump PATH] [--object TEXT]...] \
       \-- PROGRAM [ARG...]"
     , "  vestigia diff [--out FILE] [--addr2line PATH] \
       \[--object TEXT]... [--control DUMP]... [--designed DUMP]... \
@@ -112,8 +120,15 @@ usage e = do
     , "record executes PROGRAM under QEMU with vestigia's plugin and"
     , "dumps its leakage trace per instruction, with how it was run;"
     , "diff compares dumps of runs that differ only in a secret and"
-    , "reports where they diverge (vestigia/diff-v3), naming sources"
+    , "reports where they diverge (vestigia/diff-v4), naming sources"
     , "with addr2line."
+    , "--contract (arm-dit or intel-doitm, the program's ISA's) has"
+    , "record also fingerprint the operands of every instruction"
+    , "outside that data-independent-timing contract, in the objects"
+    , "the program loads whose path contains an --object TEXT (all,"
+    , "with none), read with objdump (--objdump, else"
+    , "$VESTIGIA_OBJDUMP, else llvm-objdump); diff reports those whose"
+    , "operands differed beside the origins."
     , "--object keeps origins in objects whose path contains TEXT;"
     , "--control names a run repeating the first run's secret, and"
     , "what differs in it is unsteady, not an origin."
@@ -127,7 +142,7 @@ usage e = do
 -- options before the program; "--" ends them
 options :: [String] -> Either String (Opts, [String])
 options = go (Opts Nothing Nothing Nothing Nothing Nothing Nothing
-              Nothing [] [] [])
+              Nothing [] [] [] Nothing Nothing)
   where
     go o xs = case xs of
       ("--" : rest) -> Right (o, rest)
@@ -144,6 +159,8 @@ options = go (Opts Nothing Nothing Nothing Nothing Nothing Nothing
         go o { oControls = oControls o <> [ p ] } rest
       ("--designed" : p : rest) ->
         go o { oDesigned = oDesigned o <> [ p ] } rest
+      ("--contract" : c : rest) -> go o { oContract = Just (T.pack c) } rest
+      ("--objdump" : p : rest) -> go o { oObjdump = Just p } rest
       (x : _) | take 2 x == "--" -> Left ("unknown option: " <> x)
       _ -> Right (o, xs)
 
@@ -303,6 +320,16 @@ record o prog progArgs = do
   qemu <- tool (oQemu o) ("VESTIGIA_QEMU_" <> fmap toUpper isa)
     ("qemu-" <> isa)
   plugin <- tool (oPlugin o) "VESTIGIA_PLUGIN" "libvestigia-qemu.so"
+  -- under a contract, the instructions outside it in the objects
+  -- under audit, for the plugin to watch
+  contract <- traverse (\name -> case readContract name of
+      Just c | contractIsa c == isa -> pure c
+             | otherwise -> refuseRecord (T.unpack name <> " speaks to "
+                 <> contractIsa c <> ", and " <> prog <> " is " <> isa)
+      Nothing -> refuseRecord ("no contract named " <> T.unpack name
+        <> "; arm-dit and intel-doitm are known"))
+    (oContract o)
+  watch <- traverse (\c -> watchList o qemu c prog progArgs) contract
   -- QEMU maps the guest's libraries and heap in its own address
   -- space, wherever its own allocations leave room, and those vary
   -- with how its threads run: a second malloc arena, or a large block
@@ -322,10 +349,13 @@ record o prog progArgs = do
   r <- try (withCreateProcess
          ((proc qemu (guest
                      <> [ "-seed", "0"
-                        , "-plugin", plugin <> ",out=" <> dump, prog ]
+                        , "-plugin", plugin <> ",out=" <> dump
+                            <> maybe "" (",watch=" <>) watch
+                        , prog ]
                      <> progArgs))
             { P.env = Just ((tunables, host) : others) })
          (\_ _ _ ph -> waitForProcess ph))
+  for_ watch removeFile
   case r of
     Left e -> do
       hPutStrLn stderr ("vestigia: cannot run " <> qemu <> ": "
@@ -336,8 +366,79 @@ record o prog progArgs = do
       -- in the secret alone from runs laid out apart: the guest's
       -- environment is QEMU's, with its own tunables restored
       appendRun dump (prog : progArgs)
-        (others <> [ (tunables, v) | Just v <- [ own ] ]) c
+        (others <> [ (tunables, v) | Just v <- [ own ] ]) c isa contract
       exitWith c
+
+refuseRecord :: String -> IO a
+refuseRecord e = do
+  hPutStrLn stderr ("vestigia: " <> e)
+  exitWith (ExitFailure 2)
+
+-- the plugin's watch list under a contract, written to a temporary
+-- file: every instruction outside it in the objects the program loads
+-- (and the program's own) whose path contains an --object text, all
+-- of them with none
+watchList :: Opts -> FilePath -> Contract -> FilePath -> [String]
+          -> IO FilePath
+watchList o qemu c prog progArgs = do
+  objdump <- tool (oObjdump o) "VESTIGIA_OBJDUMP" "llvm-objdump"
+  loaded <- loadedObjects qemu prog progArgs
+  objects <- fmap L.nub (traverse canonicalizePath (prog : loaded))
+  let kept = [ p | p <- objects
+                 , null (oObjects o)
+                     || any (`T.isInfixOf` T.pack p) (oObjects o) ]
+  sections <- traverse (\p -> do
+      ls <- disassemble objdump c p
+      pure (watchSection c p ls))
+    kept
+  tmp <- getTemporaryDirectory
+  (path, h) <- openTempFile tmp "vestigia.watch"
+  hClose h
+  TIO.writeFile path (T.concat sections)
+  pure path
+
+-- the shared objects a program loads, as its dynamic loader resolves
+-- them, run under QEMU so that any ISA's are found
+loadedObjects :: FilePath -> FilePath -> [String] -> IO [FilePath]
+loadedObjects qemu prog progArgs = do
+  r <- try (readCreateProcessWithExitCode
+         (proc qemu ([ "-E", "LD_TRACE_LOADED_OBJECTS=1", prog ]
+                     <> progArgs)) "")
+  case r of
+    Left e -> refuseRecord ("cannot run " <> qemu <> ": "
+      <> show (e :: IOException))
+    Right (ExitSuccess, out, _) -> pure (concatMap object (lines out))
+    Right (ExitFailure n, _, err) -> refuseRecord ("the loader could not \
+      \list what " <> prog <> " loads (exit " <> show n <> "): " <> err)
+  where
+    -- "\tNAME => PATH (0x...)" or "\tPATH (0x...)"
+    object l = case words l of
+      (_ : "=>" : p@('/' : _) : _) -> [ p ]
+      (p@('/' : _) : _) -> [ p ]
+      _ -> []
+
+-- an object's instructions, its executable sections disassembled
+-- whole: GHC's LLVM backend gives its code the type of data, which a
+-- disassembly by symbol would print as bytes
+disassemble :: FilePath -> Contract -> FilePath -> IO [Line]
+disassemble objdump c obj = do
+  headers <- objdumped [ "--section-headers", obj ]
+  let sections = [ name | l <- lines headers
+                        , (_ : name : _ : _ : kinds) <- [ words l ]
+                        , "TEXT" `elem` kinds ]
+  out <- objdumped ([ "-D" ] <> fmap ("--section=" <>) sections
+              <> [ "-M" | c == IntelDoitm ] <> [ "intel" | c == IntelDoitm ]
+              <> [ obj ])
+  pure (readDisassembly (T.pack out))
+  where
+    objdumped args = do
+      r <- try (readCreateProcessWithExitCode (proc objdump args) "")
+      case r of
+        Right (ExitSuccess, out, _) -> pure out
+        Right (ExitFailure n, _, err) -> refuseRecord (objdump <> " "
+          <> unwords args <> " failed (exit " <> show n <> "): " <> err)
+        Left e -> refuseRecord ("cannot run " <> objdump <> ": "
+          <> show (e :: IOException))
 
 -- the architecture an ELF program is built for, as QEMU names its
 -- user-mode emulators: the header's machine, at byte 18
@@ -358,10 +459,11 @@ machineOf prog = do
 
 -- append a run's record to its dump (Vestigia.Diff.readDump): its
 -- arguments' bytes, its environment's variables and the bytes they
--- take, and its exit status
+-- take, its exit status, the guest's ISA, and any contract it was
+-- recorded under
 appendRun :: FilePath -> [String] -> [(String, String)] -> ExitCode
-          -> IO ()
-appendRun dump args env code = do
+          -> String -> Maybe Contract -> IO ()
+appendRun dump args env code isa contract = do
   enc <- getFileSystemEncoding
   let bytes s = GF.withCStringLen enc s BS.packCStringLen
   as <- traverse bytes args
@@ -371,7 +473,9 @@ appendRun dump args env code = do
     | a <- as ]
     <> [ "N " <> showHex (length es) "" <> " "
            <> showHex (sum (fmap ((+ 1) . BS.length) es)) ""
-       , "X " <> show (exitStatus code) ]
+       , "X " <> show (exitStatus code)
+       , "M " <> isa ]
+    <> [ "G " <> T.unpack (contractName c) | Just c <- [ contract ] ]
   where
     byte w = case showHex w "" of
       [ d ] -> [ '0', d ]
@@ -405,6 +509,15 @@ diff o paths = do
         refuse (p <> " is a control, but does not repeat the \
           \arguments of " <> p0 <> ", the run it controls")
     [] -> pure ()
+  -- runs recorded under other contracts watched other instructions
+  case zip (paths <> oDesigned o <> oControls o)
+           (dumps <> designed <> controls) of
+    ((p0, first) : rest) -> for_ rest $ \(p, d) ->
+      when (dpContract d /= dpContract first || dpIsa d /= dpIsa first) $
+        refuse (p <> " was recorded for another ISA or under another \
+          \contract than " <> p0 <> "; runs compared must watch the \
+          \same instructions")
+    [] -> pure ()
   -- runs laid out apart differ wherever they touch memory, not by
   -- the secret: such runs are refused, not compared
   case zip paths dumps of
@@ -424,11 +537,11 @@ diff o paths = do
     [] -> pure ()
   let dv = restrictTo (oObjects o)
         (diffDesigned controls dumps designed)
+  let sites = fmap snd (dvOrigins dv) <> dvOutside dv
   places <- symbolize addr2line $
-    [ (obj, inOffset i) | (_, i) <- dvOrigins dv
-                        , Just obj <- [ inObject i ] ]
+    [ (obj, inOffset i) | i <- sites, Just obj <- [ inObject i ] ]
     -- the calls that reached each origin
-    <> [ (obj, a) | (_, i) <- dvOrigins dv
+    <> [ (obj, a) | i <- sites
                   , Just (stacks, _) <- [ M.lookup (inPc i) (dvCallers dv) ]
                   , calls <- stacks, (Just obj, a) <- calls ]
   let doc = encode (divergenceJson (T.pack (showVersion version))
