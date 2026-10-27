@@ -31,12 +31,32 @@
  * division) is given the contexts it ran in: the chains of calls, by
  * their addresses, that reached it, up to CONTEXTS of them.
  *
+ * Given a watch list (its `watch` argument, written by `vestigia
+ * record` under a data-independent-timing contract), it also
+ * fingerprints the operands of every instruction the list names: each
+ * one outside the contract, by its object and address there, with the
+ * registers it reads, fingerprinted before it runs, and any value it
+ * loads or stores, as it is accessed. One run as often but on other
+ * operands computed them from the secret. The list names divisions
+ * too, for their text alone: the plugin reads a division's operands
+ * from its bytes, as above. A list is read whole:
+ *
+ *   O <object>
+ *   D <address> <text>
+ *   U <address> <memory> <n> <register>:<low>:<width>... <text>
+ *
+ * in hex where an address, each register by the name QEMU's debugger
+ * stub gives it, the bits read from its low bit; <memory> is 1 where
+ * the instruction names memory.
+ *
  * At exit it writes, to the file named by its `out` argument:
  *
  *   I <pc> <count> <accesses> <fingerprint> <order> <object> <address>
  *   E <from> <to> <count>
  *   R <pc>
  *   D <pc> <operands>
+ *   U <pc> <operands>
+ *   W <pc> <text>
  *   C <context> <caller> <call>
  *   K <pc> <partial> <context>...
  *
@@ -67,8 +87,9 @@
 
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
-/* what an instruction is to a comparison, read from its bytes */
-enum { PLAIN, RETURN, DIVISION, CALL };
+/* what an instruction is to a comparison, read from its bytes, or
+   from the watch list (OUTSIDE) */
+enum { PLAIN, RETURN, DIVISION, CALL, OUTSIDE };
 
 /* the most contexts kept for one instruction */
 #define CONTEXTS 16
@@ -85,6 +106,16 @@ typedef struct Decoded {
   int width, a, b, high;
 } Decoded;
 
+/* an instruction the watch list names */
+typedef struct Watch {
+  int division;     /* a division, named for its text alone */
+  int nregs;
+  char **names;     /* the registers it reads, by QEMU's names */
+  int *low, *width; /* the bits read of each */
+  struct qemu_plugin_register **handles;
+  char *text;
+} Watch;
+
 typedef struct Insn {
   uint64_t pc;
   uint64_t size;
@@ -94,7 +125,9 @@ typedef struct Insn {
   uint64_t accesses;
   uint64_t fingerprint;
   uint64_t order;   /* the successors, in the order they followed */
-  uint64_t operands; /* a division's operands, in order */
+  uint64_t operands; /* a division's or a watched instruction's
+                        operands, in order */
+  const Watch *watch; /* where the watch list names it */
   GHashTable *succ; /* target pc -> count, for transfers */
   uint32_t last;    /* the context it last ran in */
   uint32_t contexts[CONTEXTS];
@@ -127,6 +160,10 @@ static GArray *calls;     /* the calls in progress, innermost last */
 static uint32_t current;  /* the context the guest runs in */
 static struct qemu_plugin_register *gpr[GPRS];
 static GByteArray *regbuf;
+static GHashTable *watches;   /* "<object>\n<address>" -> Watch */
+static GHashTable *registers; /* QEMU's name -> its handle */
+static GArray *regions;       /* the host's mappings, as last read */
+static GHashTable *segments;  /* a file's path -> its Segments */
 
 static const uint64_t fnv_offset = 0xcbf29ce484222325ULL;
 static const uint64_t fnv_prime = 0x100000001b3ULL;
@@ -334,6 +371,25 @@ static void on_divide(unsigned int vcpu, void *udata) {
     mix(i, (read_gpr(i->d.a) >> (i->d.high ? 8 : 0)) & mask);
 }
 
+/* a watched instruction: each register it reads, its bits from the
+   low one, mixed in eight bytes at a time */
+static void on_outside(unsigned int vcpu, void *udata) {
+  Insn *i = udata;
+  const Watch *w = i->watch;
+  (void)vcpu;
+  for (int k = 0; k < w->nregs; k++) {
+    int n, from = w->low[k] / 8, to = (w->low[k] + w->width[k]) / 8;
+    g_byte_array_set_size(regbuf, 0);
+    n = qemu_plugin_read_register(w->handles[k], regbuf);
+    if (to > n) to = n;
+    for (int b = from; b < to; b += 8) {
+      uint64_t v = 0;
+      memcpy(&v, regbuf->data + b, MIN((size_t)(to - b), sizeof v));
+      mix(i, v);
+    }
+  }
+}
+
 static void on_mem(unsigned int vcpu, qemu_plugin_meminfo_t info,
                    uint64_t vaddr, void *udata) {
   Insn *i = udata;
@@ -341,7 +397,7 @@ static void on_mem(unsigned int vcpu, qemu_plugin_meminfo_t info,
   i->fingerprint = (i->fingerprint ^ vaddr) * fnv_prime;
   i->accesses++;
   if (i->last != current) note_context(i);
-  if (i->d.kind == DIVISION) {
+  if (i->d.kind == DIVISION || i->d.kind == OUTSIDE) {
     qemu_plugin_mem_value v = qemu_plugin_mem_get_value(info);
     switch (v.type) {
     case QEMU_PLUGIN_MEM_VALUE_U8: mix(i, v.data.u8); break;
@@ -367,6 +423,7 @@ static void find_registers(void) {
   for (guint k = 0; k < rs->len; k++) {
     qemu_plugin_reg_descriptor *r =
       &g_array_index(rs, qemu_plugin_reg_descriptor, k);
+    g_hash_table_insert(registers, g_strdup(r->name), r->handle);
     for (int j = 0; j < wanted; j++) {
       char name[8];
       if (aarch64) g_snprintf(name, sizeof name, "x%d", j);
@@ -381,6 +438,28 @@ static void find_registers(void) {
               "which a division's operands are read\n", j);
       _exit(EXIT_FAILURE);
     }
+  /* every register the watch list reads, or none of the run */
+  GHashTableIter it;
+  gpointer key, val;
+  g_hash_table_iter_init(&it, watches);
+  while (g_hash_table_iter_next(&it, &key, &val)) {
+    Watch *w = val;
+    for (int k = 0; k < w->nregs; k++) {
+      w->handles[k] = g_hash_table_lookup(registers, w->names[k]);
+      /* a CPU with SVE names its SIMD&FP registers by their scalable
+         views, whose low 128 bits they are */
+      if (w->handles[k] == NULL && w->names[k][0] == 'v') {
+        char *z = g_strdup_printf("z%s", w->names[k] + 1);
+        w->handles[k] = g_hash_table_lookup(registers, z);
+        g_free(z);
+      }
+      if (w->handles[k] == NULL) {
+        fprintf(stderr, "vestigia-qemu: QEMU names no register %s, "
+                "which the watch list reads\n", w->names[k]);
+        _exit(EXIT_FAILURE);
+      }
+    }
+  }
 }
 
 static void on_vcpu_init(qemu_plugin_id_t id, unsigned int vcpu) {
@@ -400,6 +479,8 @@ static void on_vcpu_init(qemu_plugin_id_t id, unsigned int vcpu) {
   }
 }
 
+static const Watch *watched(uintptr_t haddr);
+
 static void on_translate(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
   size_t n = qemu_plugin_tb_n_insns(tb);
   (void)id;
@@ -412,11 +493,24 @@ static void on_translate(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
                       (uintptr_t)qemu_plugin_insn_haddr(qi),
                       aarch64 ? decode_aarch64(bytes, len)
                               : decode_x86_64(bytes, len));
-    if (k == n - 1 || i->d.kind == DIVISION) i->origin = 1;
+    /* an instruction the watch list names: a division its text, any
+       other its registers; one translated anew keeps what it had */
+    if (i->watch == NULL && g_hash_table_size(watches) > 0) {
+      const Watch *w = watched(i->haddr);
+      if (w != NULL && (i->d.kind == DIVISION || !w->division)) {
+        i->watch = w;
+        if (i->d.kind != DIVISION) i->d.kind = OUTSIDE;
+      }
+    }
+    if (k == n - 1 || i->d.kind == DIVISION || i->d.kind == OUTSIDE)
+      i->origin = 1;
     qemu_plugin_register_vcpu_insn_exec_cb(qi, on_exec,
                                            QEMU_PLUGIN_CB_NO_REGS, i);
     if (i->d.kind == DIVISION)
       qemu_plugin_register_vcpu_insn_exec_cb(qi, on_divide,
+                                             QEMU_PLUGIN_CB_R_REGS, i);
+    else if (i->d.kind == OUTSIDE)
+      qemu_plugin_register_vcpu_insn_exec_cb(qi, on_outside,
                                              QEMU_PLUGIN_CB_R_REGS, i);
     qemu_plugin_register_vcpu_mem_cb(qi, on_mem, QEMU_PLUGIN_CB_NO_REGS,
                                      QEMU_PLUGIN_MEM_RW, i);
@@ -527,6 +621,110 @@ static gboolean address_in(const Segments *s, uint64_t off,
   return FALSE;
 }
 
+/* the watch list's entry for the instruction at a host address: its
+   file and address there, the mappings read anew where the address
+   lies in none known */
+static const Watch *watched(uintptr_t haddr) {
+  const Region *r = region_of(regions, haddr);
+  Segments *s;
+  uint64_t addr;
+  if (r == NULL) {
+    for (guint k = 0; k < regions->len; k++)
+      g_free(g_array_index(regions, Region, k).path);
+    g_array_free(regions, TRUE);
+    regions = read_maps();
+    r = region_of(regions, haddr);
+  }
+  if (r == NULL) return NULL;
+  s = segments_of(segments, r->path);
+  if (s == NULL
+      || !address_in(s, (uint64_t)(haddr - r->start) + r->offset, &addr))
+    return NULL;
+  char *key = g_strdup_printf("%s\n%" PRIx64, r->path, addr);
+  const Watch *w = g_hash_table_lookup(watches, key);
+  g_free(key);
+  return w;
+}
+
+/* read a watch list whole; a line it cannot read stops the run */
+static gboolean read_watches(const char *path) {
+  gchar *text = NULL;
+  gchar *object = NULL;
+  if (!g_file_get_contents(path, &text, NULL, NULL)) {
+    fprintf(stderr, "vestigia-qemu: cannot read the watch list %s\n",
+            path);
+    return FALSE;
+  }
+  gchar **lines = g_strsplit(text, "\n", -1);
+  gboolean ok = TRUE;
+  for (gchar **l = lines; ok && *l != NULL; l++) {
+    gchar *line = *l;
+    if (line[0] == '\0') continue;
+    if (line[0] == 'O' && line[1] == ' ') {
+      g_free(object);
+      object = g_strdup(line + 2);
+      continue;
+    }
+    if (object == NULL || (line[0] != 'D' && line[0] != 'U')
+        || line[1] != ' ') {
+      ok = FALSE;
+      break;
+    }
+    char *p = line + 2, *end;
+    uint64_t addr = g_ascii_strtoull(p, &end, 16);
+    Watch *w = g_new0(Watch, 1);
+    if (end == p || *end != ' ') ok = FALSE;
+    p = end + 1;
+    if (ok && line[0] == 'D')
+      w->division = 1;
+    else if (ok) {
+      /* <memory> <n> then n registers */
+      if ((p[0] != '0' && p[0] != '1') || p[1] != ' ') ok = FALSE;
+      p += 2;
+      w->nregs = ok ? (int)g_ascii_strtoll(p, &end, 10) : 0;
+      if (end == p || *end != ' ' || w->nregs < 0 || w->nregs > 16)
+        ok = FALSE;
+      p = end + 1;
+      w->names = g_new0(char *, w->nregs);
+      w->low = g_new0(int, w->nregs);
+      w->width = g_new0(int, w->nregs);
+      w->handles = g_new0(struct qemu_plugin_register *, w->nregs);
+      for (int k = 0; ok && k < w->nregs; k++) {
+        char *sp = strchr(p, ' ');
+        if (sp == NULL) {
+          ok = FALSE;
+          break;
+        }
+        gchar *spec = g_strndup(p, (gsize)(sp - p));
+        gchar **f = g_strsplit(spec, ":", 3);
+        g_free(spec);
+        if (g_strv_length(f) != 3) ok = FALSE;
+        else {
+          w->names[k] = g_strdup(f[0]);
+          w->low[k] = atoi(f[1]);
+          w->width[k] = atoi(f[2]);
+          if (w->low[k] % 8 != 0 || w->width[k] % 8 != 0
+              || w->width[k] <= 0)
+            ok = FALSE;
+        }
+        g_strfreev(f);
+        p = sp + 1;
+      }
+    }
+    if (!ok) break;
+    w->text = g_strdup(p);
+    g_hash_table_insert(watches,
+                        g_strdup_printf("%s\n%" PRIx64, object, addr), w);
+  }
+  if (!ok)
+    fprintf(stderr, "vestigia-qemu: %s: an unreadable watch list\n",
+            path);
+  g_strfreev(lines);
+  g_free(object);
+  g_free(text);
+  return ok;
+}
+
 static void at_exit(qemu_plugin_id_t id, void *p) {
   (void)id;
   (void)p;
@@ -558,6 +756,10 @@ static void at_exit(qemu_plugin_id_t id, void *p) {
     if (i->d.kind == RETURN) fprintf(out, "R %" PRIx64 "\n", i->pc);
     if (i->d.kind == DIVISION)
       fprintf(out, "D %" PRIx64 " %016" PRIx64 "\n", i->pc, i->operands);
+    if (i->d.kind == OUTSIDE)
+      fprintf(out, "U %" PRIx64 " %016" PRIx64 "\n", i->pc, i->operands);
+    if (i->watch != NULL)
+      fprintf(out, "W %" PRIx64 " %s\n", i->pc, i->watch->text);
     if (i->ncontexts > 0) {
       fprintf(out, "K %" PRIx64 " %d", i->pc, i->partial);
       for (int k = 0; k < i->ncontexts; k++)
@@ -582,16 +784,25 @@ static void at_exit(qemu_plugin_id_t id, void *p) {
 QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
                                            const qemu_info_t *info,
                                            int argc, char **argv) {
+  const char *watch_path = NULL;
   aarch64 = strcmp(info->target_name, "aarch64") == 0;
   for (int k = 0; k < argc; k++)
     if (strncmp(argv[k], "out=", 4) == 0)
       out_path = g_strdup(argv[k] + 4);
+    else if (strncmp(argv[k], "watch=", 6) == 0)
+      watch_path = argv[k] + 6;
   if (out_path == NULL) {
     fprintf(stderr, "vestigia-qemu: an out=FILE argument is needed\n");
     return -1;
   }
   insns = g_hash_table_new(g_int64_hash, g_int64_equal);
   regbuf = g_byte_array_new();
+  watches = g_hash_table_new(g_str_hash, g_str_equal);
+  registers = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                    NULL);
+  regions = g_array_new(FALSE, FALSE, sizeof(Region));
+  segments = g_hash_table_new(g_str_hash, g_str_equal);
+  if (watch_path != NULL && !read_watches(watch_path)) return -1;
   contexts = g_array_new(FALSE, FALSE, sizeof(Context));
   interned = g_hash_table_new_full(context_hash, context_equal, g_free,
                                    NULL);
