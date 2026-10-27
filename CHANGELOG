@@ -13,6 +13,8 @@
     ran (vestigia/diff-v4, which also names the ISA and contract, and
     gives an operand origin its text where the watch list named it).
     Runs recorded under other contracts are refused.
+  * `vestigia watch` writes the watch list once, for `record --watch`
+    to read in every run of one program; `diffOf` does so.
   * `record` appends the guest's ISA to its dump.
   * `diffOf` takes a `contract`; the command finds LLVM's
     `llvm-objdump` through `$VESTIGIA_OBJDUMP`.

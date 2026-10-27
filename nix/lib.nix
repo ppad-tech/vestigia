@@ -115,20 +115,26 @@ let
   # them for control and coverage but not for addresses (vestigia
   # diff --designed). Under a `contract` (arm-dit or intel-doitm, the
   # harness's ISA's), every run also fingerprints the operands of the
-  # instructions outside it in `objects` (vestigia record --contract).
+  # instructions outside it in `objects`, listed once (vestigia watch,
+  # kept as `watch`) for every run to read (record --watch).
   # A run's own failure leaves its status; a dump vestigia cannot read
   # fails the build.
   diffOf = { name, harness, runs, objects ? [ ], designed ? [ ]
            , contract ? null }:
     let
       watch = lib.optionalString (contract != null)
-        ("--contract ${lib.escapeShellArg contract} "
-          + lib.concatMapStrings (o: "--object ${lib.escapeShellArg o} ")
-              objects);
+        "--contract ${lib.escapeShellArg contract} --watch $out/watch ";
     in
     pkgs.runCommand "vestigia-diff-${name}" { } ''
       mkdir -p $out
       start=$(date +%s%N)
+      ${lib.optionalString (contract != null) ''
+        ${vestigia}/bin/vestigia watch --out $out/watch \
+          --contract ${lib.escapeShellArg contract} \
+          ${lib.concatMapStrings (o: "--object ${lib.escapeShellArg o} ")
+              objects}-- ${harness} \
+          ${lib.escapeShellArgs (builtins.head runs)}
+      ''}
       ${lib.concatImapStrings (k: args: ''
         set +e
         ${vestigia}/bin/vestigia record --dump $out/dump-${toString k} \
