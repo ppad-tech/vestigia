@@ -28,6 +28,16 @@ import Text.Read (readMaybe)
 
 import Vestigia.Xml
 
+-- | A document without its leak summary, from its opening tag to its
+--   closing one.
+withoutLeakSummary :: T.Text -> T.Text
+withoutLeakSummary t =
+  let (before, rest) = T.breakOn "<leak_summary>" t
+      (_, after) = T.breakOn "</leak_summary>" rest
+  in if T.null rest || T.null after
+       then t
+       else before <> T.drop (T.length "</leak_summary>") after
+
 -- | One stack frame: the instruction address, and what debug
 --   information says of it.
 data Frame = Frame {
@@ -66,10 +76,12 @@ data Memcheck = Memcheck {
   , mcErrors :: ![MemError]
   } deriving (Eq, Show)
 
--- | Read a memcheck XML document.
+-- | Read a memcheck XML document. Its leak summary is passed over
+--   unread: nothing here reads it, and valgrind 3.26 writes it with
+--   an element left open.
 readMemcheck :: T.Text -> Either String Memcheck
 readMemcheck t = do
-  root <- parseDocument t
+  root <- parseDocument (withoutLeakSummary t)
   case root of
     Element "valgrindoutput" _ -> pure ()
     _ -> Left "not a valgrind XML document"

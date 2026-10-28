@@ -78,6 +78,13 @@ memcheckTests = testGroup "memcheck"
       isLeft (readMemcheck "<valgrindoutput><protocoltool>helgrind\
                            \</protocoltool></valgrindoutput>")
         @? "accepted"
+
+  , testCase "a leak summary left open is passed over" $
+      -- as valgrind 3.26 writes it, still_reachable never closed
+      fmap mcErrors (readMemcheck "<valgrindoutput><protocoltool>\
+        \memcheck</protocoltool><leak_summary><still_reachable>\
+        \<bytes>0</bytes><suppressed><bytes>0</bytes></suppressed>\
+        \</leak_summary></valgrindoutput>") @?= Right []
   ]
 
 traceTests :: TestTree
