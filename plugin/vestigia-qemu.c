@@ -68,12 +68,20 @@
  * the file; in an executable linked at a fixed address it is not. A
  * context is the call at <call> made in context <caller>, context 0
  * being the program's own; <partial> is 1 where an instruction ran in
- * more contexts than are kept. A guest that started a second thread
- * gets the line `T 2` alone.
+ * more contexts than are kept. Last comes
  *
- * The state below is unlocked, so one guest thread is recorded: a
- * guest that starts a second one is stopped there, its dump saying
- * so, rather than recorded by threads racing on it.
+ *   T <threads>
+ *
+ * the number of threads the guest started, its own among them.
+ *
+ * One guest thread is recorded: the program's own, the first, on
+ * which its main function runs. Other threads (a language runtime's
+ * collector and scheduler, say) run unrecorded, their instructions
+ * counted nowhere, so that what they do as time allows does not
+ * enter the trace; a harness calls the code under audit on its own
+ * thread. Each thread is a vCPU of its own, and any of them may
+ * translate code, so the instructions are made under a lock; what
+ * an instruction does is kept by the recorded thread alone.
  */
 #include <elf.h>
 #include <glib.h>
@@ -153,6 +161,8 @@ static GHashTable *insns; /* pc -> Insn */
 static Insn *prev;        /* the instruction executed last */
 static char *out_path;
 static gint vcpus;        /* the guest's threads, a vCPU each */
+static unsigned int recorded; /* the program's own thread's vCPU */
+static GMutex translating;  /* held while instructions are made */
 static gboolean aarch64;  /* the guest's ISA: aarch64, else x86_64 */
 static GArray *contexts;  /* Context by number, 0 the program's own */
 static GHashTable *interned; /* Context -> its number */
@@ -324,7 +334,7 @@ static void note_context(Insn *i) {
 
 static void on_exec(unsigned int vcpu, void *udata) {
   Insn *i = udata;
-  (void)vcpu;
+  if (vcpu != recorded) return;
   if (prev != NULL) {
     prev->order = (prev->order ^ i->pc) * fnv_prime;
     if (i->pc != prev->pc + prev->size) transfer(prev, i->pc);
@@ -354,7 +364,7 @@ static uint64_t read_gpr(int r) {
 static void on_divide(unsigned int vcpu, void *udata) {
   Insn *i = udata;
   uint64_t mask = i->d.width == 64 ? ~0ULL : (1ULL << i->d.width) - 1;
-  (void)vcpu;
+  if (vcpu != recorded) return;
   if (aarch64) {
     mix(i, read_gpr(i->d.a) & mask);
     mix(i, read_gpr(i->d.b) & mask);
@@ -376,7 +386,7 @@ static void on_divide(unsigned int vcpu, void *udata) {
 static void on_outside(unsigned int vcpu, void *udata) {
   Insn *i = udata;
   const Watch *w = i->watch;
-  (void)vcpu;
+  if (vcpu != recorded) return;
   for (int k = 0; k < w->nregs; k++) {
     int n, from = w->low[k] / 8, to = (w->low[k] + w->width[k]) / 8;
     g_byte_array_set_size(regbuf, 0);
@@ -393,7 +403,7 @@ static void on_outside(unsigned int vcpu, void *udata) {
 static void on_mem(unsigned int vcpu, qemu_plugin_meminfo_t info,
                    uint64_t vaddr, void *udata) {
   Insn *i = udata;
-  (void)vcpu;
+  if (vcpu != recorded) return;
   i->fingerprint = (i->fingerprint ^ vaddr) * fnv_prime;
   i->accesses++;
   if (i->last != current) note_context(i);
@@ -462,20 +472,12 @@ static void find_registers(void) {
   }
 }
 
+/* the first vCPU is the program's own thread, which is recorded */
 static void on_vcpu_init(qemu_plugin_id_t id, unsigned int vcpu) {
   (void)id;
-  (void)vcpu;
-  if (g_atomic_int_add(&vcpus, 1) == 0)
+  if (g_atomic_int_add(&vcpus, 1) == 0) {
+    recorded = vcpu;
     find_registers();
-  else {
-    FILE *out = fopen(out_path, "w");
-    if (out != NULL) {
-      fprintf(out, "T 2\n");
-      fclose(out);
-    }
-    fprintf(stderr, "vestigia-qemu: the guest started a second thread, "
-            "which a trace cannot record; the run is stopped\n");
-    _exit(EXIT_FAILURE);
   }
 }
 
@@ -484,6 +486,7 @@ static const Watch *watched(uintptr_t haddr);
 static void on_translate(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
   size_t n = qemu_plugin_tb_n_insns(tb);
   (void)id;
+  g_mutex_lock(&translating);
   for (size_t k = 0; k < n; k++) {
     struct qemu_plugin_insn *qi = qemu_plugin_tb_get_insn(tb, k);
     uint8_t bytes[16];
@@ -515,6 +518,7 @@ static void on_translate(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
     qemu_plugin_register_vcpu_mem_cb(qi, on_mem, QEMU_PLUGIN_CB_NO_REGS,
                                      QEMU_PLUGIN_MEM_RW, i);
   }
+  g_mutex_unlock(&translating);
 }
 
 /* the host's file-backed mappings, for naming an instruction's file */
@@ -725,6 +729,8 @@ static gboolean read_watches(const char *path) {
   return ok;
 }
 
+/* QEMU removes every other callback before this one, so no thread
+   touches the tables while they are written out */
 static void at_exit(qemu_plugin_id_t id, void *p) {
   (void)id;
   (void)p;
@@ -778,6 +784,7 @@ static void at_exit(qemu_plugin_id_t id, void *p) {
     fprintf(out, "C %x %" PRIx32 " %" PRIx64 "\n", k, c->caller,
             c->call);
   }
+  fprintf(out, "T %x\n", (unsigned)g_atomic_int_get(&vcpus));
   fclose(out);
 }
 

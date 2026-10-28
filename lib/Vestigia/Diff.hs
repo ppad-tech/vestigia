@@ -96,6 +96,7 @@ import Control.Monad (foldM, unless)
 import qualified Data.ByteString as BS
 import qualified Data.List as L
 import qualified Data.Map.Strict as M
+import qualified Data.Maybe as Maybe
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -155,6 +156,9 @@ data Dump = Dump {
   , dpIsa :: !(Maybe T.Text)
   , dpContract :: !(Maybe T.Text)
   , dpCpu :: !(Maybe T.Text)
+    -- | the threads the guest started, its own among them, of which
+    --   its own alone was recorded
+  , dpThreads :: !(Maybe Integer)
   } deriving (Eq, Show)
 
 -- | Read a plugin dump. A dump in which no instruction ran records
@@ -167,11 +171,13 @@ data Dump = Dump {
 --   and bytes, in hex; @X@, the exit status, in decimal) is read
 --   whole or not at all. Beside it, @M@ names the guest's ISA, @G@
 --   the contract the run was recorded under, and @P@ the CPU model
---   QEMU emulated, where one was named.
+--   QEMU emulated, where one was named; the plugin's @T@ names the
+--   threads the guest started, its own among them.
 readDump :: T.Text -> Either String Dump
 readDump t = do
   d <- foldM line (Dump M.empty M.empty S.empty M.empty M.empty M.empty
-                     Nothing M.empty M.empty Nothing Nothing Nothing, []
+                     Nothing M.empty M.empty Nothing Nothing Nothing Nothing
+                  , []
                   , Nothing
                   , Nothing) (T.lines t)
   let (dump, as, env, st) = d
@@ -234,9 +240,9 @@ readDump t = do
         xs <- traverse unhex cs
         pure (d { dpCallers = M.insert k (p, xs) (dpCallers d) }, as
              , env, st)
-      [ "T", _ ] ->
-        Left "the guest started a second thread, which a trace \
-             \cannot record: the run was stopped"
+      [ "T", n ] -> do
+        k <- unhex n
+        pure (d { dpThreads = Just k }, as, env, st)
       [ "A" ] -> pure (d, BS.empty : as, env, st)
       [ "A", h ] -> do
         b <- unhexBytes h
@@ -372,6 +378,9 @@ data Divergence = Divergence {
   , dvIsa :: !(Maybe T.Text)
   , dvContract :: !(Maybe T.Text)
   , dvCpu :: !(Maybe T.Text)
+    -- | the most threads any run started, its own among them, of
+    --   which its own alone was recorded
+  , dvThreads :: !(Maybe Integer)
   } deriving (Eq, Show)
 
 -- | Compare runs, uncontrolled.
@@ -437,6 +446,9 @@ diffDesigned cs ds xs = Divergence {
   , dvCpu = case ds of
       (d : _) -> dpCpu d
       [] -> Nothing
+  , dvThreads = case Maybe.mapMaybe dpThreads (ds <> xs <> cs) of
+      [] -> Nothing
+      ns -> Just (maximum ns)
   }
   where
     ranIn' rs pc = [ (k, d) | (k, d) <- zip [ 0 .. ] rs
@@ -632,6 +644,7 @@ divergenceJson version runs places dv = Object
   , ("tool", Object [ ("name", String "vestigia")
                     , ("version", String version) ])
   , ("isa", maybe Null String (dvIsa dv))
+  , ("threads", maybe Null Number (dvThreads dv))
   , ("contract", case dvContract dv of
       Just n -> Object
         [ ("name", String n)

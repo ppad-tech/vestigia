@@ -493,8 +493,12 @@ diffTests = testGroup "diff"
   , testCase "an unreadable line is refused" $
       isLeft (readDump "I 10 zz 0 f 0 /lib.so 0\n") @? "accepted"
 
-  , testCase "a guest stopped for a second thread is refused" $
-      isLeft (readDump "T 2\n") @? "accepted"
+  , testCase "a run names the threads its guest started" $ do
+      a <- either assertFailure pure (readDump (dumpA <> "T 1\n"))
+      b <- either assertFailure pure (readDump (dumpB <> "T a\n"))
+      dpThreads a @?= Just 1
+      dvThreads (diffDumps [ a, b ]) @?= Just 10
+      dvThreads (diffDumps [ a, a ]) @?= Just 1
 
   , testCase "a run's record reads whole" $ do
       d <- either assertFailure pure (readDump (dumpA <> T.unlines

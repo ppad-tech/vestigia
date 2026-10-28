@@ -1,5 +1,11 @@
 # Changelog
 
+- 0.2.2 (unreleased)
+  * `record` runs a guest that starts threads, recording its own
+    thread alone, the one its main function runs on; the others run
+    unrecorded. The plugin appends how many threads ran, and `diff`
+    reports the most any run started (`threads`).
+
 - 0.2.1 (2026-11-02)
   * `record` starts each run in a PID namespace of its own, so that
     every run sees one pid: a guest that keeps its pid (a random

@@ -127,7 +127,9 @@ vestigia.lib.x86_64-linux.diffOf {
   Use both.
 * valgrind and QEMU user mode run on Linux only. `record` runs x86_64
   or aarch64 harnesses on either host; memcheck needs a native one.
-* `record` stops a guest that starts a second thread.
+* `record` records the program's own thread alone: code under audit
+  must run on the thread its main function does. Other threads (a
+  runtime's collector or scheduler) run unrecorded.
 * A guest reading `/dev/urandom` reads the host's.
 * An address origin may be a layout moved by an earlier secret
   branch, rather than an address computed from the secret.
