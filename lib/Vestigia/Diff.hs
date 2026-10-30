@@ -150,10 +150,11 @@ data Dump = Dump {
   , dpOutside :: !(M.Map Integer T.Text)
     -- | the text of each instruction the watch list named
   , dpTexts :: !(M.Map Integer T.Text)
-    -- | the guest's ISA, and the contract, as `vestigia record`
-    --   appends them
+    -- | the guest's ISA, the contract, and the CPU model QEMU
+    --   emulated, as `vestigia record` appends them
   , dpIsa :: !(Maybe T.Text)
   , dpContract :: !(Maybe T.Text)
+  , dpCpu :: !(Maybe T.Text)
   } deriving (Eq, Show)
 
 -- | Read a plugin dump. A dump in which no instruction ran records
@@ -164,12 +165,14 @@ data Dump = Dump {
 --   program's own. The record `vestigia record` appends (an @A@ line
 --   per argument, its bytes in hex; @N@, the environment's variables
 --   and bytes, in hex; @X@, the exit status, in decimal) is read
---   whole or not at all. Beside it, @M@ names the guest's ISA and @G@
---   the contract the run was recorded under.
+--   whole or not at all. Beside it, @M@ names the guest's ISA, @G@
+--   the contract the run was recorded under, and @P@ the CPU model
+--   QEMU emulated, where one was named.
 readDump :: T.Text -> Either String Dump
 readDump t = do
   d <- foldM line (Dump M.empty M.empty S.empty M.empty M.empty M.empty
-                     Nothing M.empty M.empty Nothing Nothing, [], Nothing
+                     Nothing M.empty M.empty Nothing Nothing Nothing, []
+                  , Nothing
                   , Nothing) (T.lines t)
   let (dump, as, env, st) = d
       cx = dpContexts dump
@@ -216,6 +219,7 @@ readDump t = do
              , env, st)
       [ "M", isa ] -> pure (d { dpIsa = Just isa }, as, env, st)
       [ "G", c ] -> pure (d { dpContract = Just c }, as, env, st)
+      [ "P", c ] -> pure (d { dpCpu = Just c }, as, env, st)
       [ "C", c, caller, call ] -> do
         v <- (,) <$> unhex caller <*> unhex call
         k <- unhex c
@@ -363,10 +367,11 @@ data Divergence = Divergence {
   , dvWatched :: !(M.Map T.Text (S.Set Integer))
     -- | the text of each instruction the watch list named
   , dvTexts :: !(M.Map Integer T.Text)
-    -- | the guest's ISA and the contract, as the declared runs name
-    --   them
+    -- | the guest's ISA, the contract, and the CPU model, as the
+    --   declared runs name them
   , dvIsa :: !(Maybe T.Text)
   , dvContract :: !(Maybe T.Text)
+  , dvCpu :: !(Maybe T.Text)
   } deriving (Eq, Show)
 
 -- | Compare runs, uncontrolled.
@@ -428,6 +433,9 @@ diffDesigned cs ds xs = Divergence {
       [] -> Nothing
   , dvContract = case ds of
       (d : _) -> dpContract d
+      [] -> Nothing
+  , dvCpu = case ds of
+      (d : _) -> dpCpu d
       [] -> Nothing
   }
   where
@@ -612,8 +620,8 @@ originText o = case o of
 --   runs alike at it by the first two. An origin's stacks are its own
 --   frames then its calls', innermost first, each frame with the
 --   object and address of the instruction it names, as memcheck's
---   are in a taint report. The ISA and contract the runs were
---   recorded under head it; the instructions outside the contract
+--   are in a taint report. The ISA, contract, and CPU model the runs
+--   were recorded under head it; the instructions outside the contract
 --   whose operands differed are given as origins are, and those that
 --   ran, by object, as what was executed is.
 divergenceJson
@@ -630,6 +638,7 @@ divergenceJson version runs places dv = Object
         , ("source", maybe Null (String . contractSource)
             (readContract n)) ]
       Nothing -> Null)
+  , ("cpu", maybe Null String (dvCpu dv))
   , ("runs", Array
       [ Object
           [ ("name", String (nmName r))

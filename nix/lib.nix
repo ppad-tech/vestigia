@@ -27,12 +27,16 @@ let
   # instruction, and the QEMU that runs a harness under it, for
   # either ISA, whatever the host's: user mode alone, its guest's
   # getrandom drawn from the generator -seed fixes
-  # (qemu-getrandom.patch)
+  # (qemu-getrandom.patch), and an Arm CPU without the cryptographic
+  # extension to be had (crypto=off, qemu-crypto.patch)
   qemu = (pkgs.qemu.override {
     userOnly = true;
     hostCpuTargets = [ "x86_64-linux-user" "aarch64-linux-user" ];
   }).overrideAttrs (o: {
-    patches = (o.patches or [ ]) ++ [ ./qemu-getrandom.patch ];
+    patches = (o.patches or [ ]) ++ [
+      ./qemu-getrandom.patch
+      ./qemu-crypto.patch
+    ];
   });
   plugin = pkgs.runCommandCC "vestigia-qemu-plugin" {
     nativeBuildInputs = [ pkgs.pkg-config ];
@@ -116,12 +120,17 @@ let
   # diff --designed). Under a `contract` (arm-dit or intel-doitm, the
   # harness's ISA's), every run also fingerprints the operands of the
   # instructions outside it in `objects`, listed once (vestigia watch,
-  # kept as `watch`) for every run to read (record --watch).
+  # kept as `watch`) for every run to read (record --watch). On a
+  # `cpu`, every run is recorded with QEMU emulating that model (its
+  # -cpu, properties and all), so that a harness choosing its code by
+  # the CPU's features runs the code that model leads it to.
   # A run's own failure leaves its status; a dump vestigia cannot read
   # fails the build.
   diffOf = { name, harness, runs, objects ? [ ], designed ? [ ]
-           , contract ? null }:
+           , contract ? null, cpu ? null }:
     let
+      model = lib.optionalString (cpu != null)
+        "--cpu ${lib.escapeShellArg cpu} ";
       watch = lib.optionalString (contract != null)
         "--contract ${lib.escapeShellArg contract} --watch $out/watch ";
     in
@@ -129,7 +138,7 @@ let
       mkdir -p $out
       start=$(date +%s%N)
       ${lib.optionalString (contract != null) ''
-        ${vestigia}/bin/vestigia watch --out $out/watch \
+        ${vestigia}/bin/vestigia watch --out $out/watch ${model}\
           --contract ${lib.escapeShellArg contract} \
           ${lib.concatMapStrings (o: "--object ${lib.escapeShellArg o} ")
               objects}-- ${harness} \
@@ -138,7 +147,7 @@ let
       ${lib.concatImapStrings (k: args: ''
         set +e
         ${vestigia}/bin/vestigia record --dump $out/dump-${toString k} \
-          ${watch}-- ${harness} ${lib.escapeShellArgs args} \
+          ${model}${watch}-- ${harness} ${lib.escapeShellArgs args} \
           > $out/stdout-${toString k} 2> $out/stderr-${toString k}
         echo $? > $out/status-${toString k}
         set -e
@@ -146,7 +155,7 @@ let
         set +e
         ${vestigia}/bin/vestigia record \
           --dump $out/designed-${toString k} \
-          ${watch}-- ${harness} ${lib.escapeShellArgs args} \
+          ${model}${watch}-- ${harness} ${lib.escapeShellArgs args} \
           > $out/stdout-designed-${toString k} \
           2> $out/stderr-designed-${toString k}
         echo $? > $out/status-designed-${toString k}
@@ -154,7 +163,8 @@ let
       '') designed}
       set +e
       ${vestigia}/bin/vestigia record --dump $out/control-1 \
-        ${watch}-- ${harness} ${lib.escapeShellArgs (builtins.head runs)} \
+        ${model}${watch}-- ${harness} \
+        ${lib.escapeShellArgs (builtins.head runs)} \
         > $out/stdout-control-1 2> $out/stderr-control-1
       echo $? > $out/status-control-1
       set -e
