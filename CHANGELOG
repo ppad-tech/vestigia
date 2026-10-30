@@ -18,6 +18,9 @@
   * `record` appends the guest's ISA to its dump.
   * `diffOf` takes a `contract`; the command finds LLVM's
     `llvm-objdump` through `$VESTIGIA_OBJDUMP`.
+  * `read` resolves the objects a harness reports to the files they
+    name, as memcheck names a frame's object, so a library reached by
+    its soname's link has its sites placed by offset.
 
 - 0.1.0 (2026-10-22)
   * Initial version, with two instruments over a harness that marks

@@ -54,7 +54,8 @@ import Vestigia.Layout (fixLayout)
 import Vestigia.Memcheck (Memcheck, readMemcheck)
 import Vestigia.Symbol (symbolize)
 import Vestigia.Trace
-  (Taint(..), readObjects, sitesIn, trace, traceJson, traceSummary)
+  (Taint(..), readObjects, resolveObjects, sitesIn, trace, traceJson,
+   traceSummary)
 
 data Opts = Opts {
     oValgrind :: !(Maybe FilePath)
@@ -289,7 +290,7 @@ markedObjects p = do
         \no secret (vestigia_secret was never called on any bytes); \
         \its run says nothing")
       exitWith (ExitFailure 2)
-    Right os -> pure os
+    Right os -> resolveObjects os
 
 readXml :: FilePath -> IO Memcheck
 readXml xml = do
