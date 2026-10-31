@@ -11,11 +11,12 @@ build-type:         Simple
 tested-with:        GHC == 9.10.3
 extra-doc-files:    CHANGELOG
 description:
-  vestigia runs a harness under valgrind's memcheck, with the bytes
-  the harness marked secret made undefined, and reports every branch
-  and address the execution computed from them, with its source
-  line. It reads the constant-time discipline off a running program:
-  exact on the paths executed, and free of timing noise.
+  vestigia runs a harness and reports every instruction that
+  branched on a secret it marked, computed an address from it, or
+  divided by or into it, naming each by function and source line.
+  It has two instruments: taint tracking under valgrind's memcheck,
+  and differential traces under QEMU, optionally checked against an
+  ISA's data-independent-timing contract.
 
 source-repository head
   type:     git
