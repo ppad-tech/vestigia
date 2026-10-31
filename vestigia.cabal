@@ -44,6 +44,7 @@ library
       base >= 4.9 && < 5
     , bytestring
     , containers
+    , directory
     , process
     , text
 
@@ -78,6 +79,8 @@ test-suite vestigia-tests
       base
     , bytestring
     , containers
+    , directory
+    , filepath
     , tasty
     , tasty-hunit
     , text

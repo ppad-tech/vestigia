@@ -33,16 +33,19 @@ module Vestigia.Trace (
   , trace
   , sitesIn
   , readObjects
+  , resolveObjects
   , objectOffset
   , traceJson
   , traceSummary
   , classText
   ) where
 
+import Control.Exception (IOException, try)
 import qualified Data.List as L
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import Numeric (readHex, showHex)
+import System.Directory (canonicalizePath, doesPathExist)
 
 import Vestigia.Json
 import Vestigia.Memcheck
@@ -189,6 +192,23 @@ readObjects = traverse line . filter (not . T.null . T.strip) . T.lines
 
 -- | A frame's address in its object, where the harness reported the
 --   object: by its path, else by its file name.
+-- | A run's objects, each path resolved to the file it names, as
+--   memcheck names a frame's object: a loader reaches a library by
+--   the link its soname names, memcheck by the file the link leads
+--   to. A path that names nothing here, as in a report made
+--   elsewhere, is kept as reported.
+resolveObjects :: [(Integer, T.Text)] -> IO [(Integer, T.Text)]
+resolveObjects = traverse resolve
+  where
+    resolve (b, p) = do
+      let path = T.unpack p
+      here <- doesPathExist path
+      if not here then pure (b, p) else do
+        r <- try (canonicalizePath path)
+        pure (b, either (keep p) T.pack r)
+    keep :: T.Text -> IOException -> T.Text
+    keep p _ = p
+
 objectOffset :: [(Integer, T.Text)] -> Frame -> Maybe Integer
 objectOffset os f = do
   obj <- frObj f

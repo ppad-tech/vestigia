@@ -9,6 +9,8 @@ import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import System.Directory
+import System.FilePath ((</>))
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -107,6 +109,23 @@ traceTests = testGroup "trace"
       objectOffset os (f "/nix/store/y-h/bin/harness" 0x401000)
         @?= Just 0x401000
       objectOffset os (f "/lib/libc.so.6" 0x7000) @?= Nothing
+
+  , testCase "an object reached by a link is named by its file" $ do
+      tmp <- getTemporaryDirectory
+      let dir = tmp </> "vestigia-resolve-objects"
+          file = dir </> "liba.so.1.2.3"
+          link = dir </> "liba.so.1"
+      removePathForcibly dir
+      createDirectoryIfMissing True dir
+      writeFile file ""
+      createFileLink "liba.so.1.2.3" link
+      real <- T.pack <$> canonicalizePath file
+      os <- resolveObjects
+        [ (0x4000000, T.pack link), (0, "/nowhere/bin/harness") ]
+      removePathForcibly dir
+      os @?= [ (0x4000000, real), (0, "/nowhere/bin/harness") ]
+      objectOffset os (Frame 0x4000010 (Just real) Nothing Nothing Nothing)
+        @?= Just 0x10
 
   , testCase "a site is kept to the objects named" $ do
       tr <- one <$> fixture "probe.xml"
