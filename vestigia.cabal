@@ -55,6 +55,11 @@ executable vestigia
   main-is:          Main.hs
   ghc-options:
       -Wall -Werror -rtsopts
+  -- Setup builds this in dist/build/vestigia, which a case-insensitive
+  -- filesystem merges with the library's dist/build/Vestigia; clang's
+  -- preprocessor flags the case mismatch, and -Werror makes it fatal
+  if os(osx)
+    ghc-options: -optP-Wno-nonportable-include-path
   other-modules:
       Paths_vestigia
   autogen-modules:
