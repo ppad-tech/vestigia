@@ -71,6 +71,7 @@ data Opts = Opts {
   , oContract :: !(Maybe T.Text)
   , oObjdump :: !(Maybe FilePath)
   , oWatch :: !(Maybe FilePath)
+  , oCpu :: !(Maybe String)
   }
 
 main :: IO ()
@@ -108,11 +109,12 @@ usage e = do
     , "  vestigia run [--valgrind PATH] [--dir DIR] [--out FILE] \
       \[--object TEXT]... -- PROGRAM [ARG...]"
     , "  vestigia read [--out FILE] [--object TEXT]... RUN..."
-    , "  vestigia record [--qemu PATH] [--plugin PATH] --dump FILE \
-      \[--contract NAME [--watch FILE | [--objdump PATH] \
+    , "  vestigia record [--qemu PATH] [--plugin PATH] [--cpu MODEL] \
+      \--dump FILE [--contract NAME [--watch FILE | [--objdump PATH] \
       \[--object TEXT]...]] -- PROGRAM [ARG...]"
-    , "  vestigia watch [--qemu PATH] [--out FILE] --contract NAME \
-      \[--objdump PATH] [--object TEXT]... -- PROGRAM [ARG...]"
+    , "  vestigia watch [--qemu PATH] [--cpu MODEL] [--out FILE] \
+      \--contract NAME [--objdump PATH] [--object TEXT]... -- PROGRAM \
+      \[ARG...]"
     , "  vestigia diff [--out FILE] [--addr2line PATH] \
       \[--object TEXT]... [--control DUMP]... [--designed DUMP]... \
       \DUMP DUMP..."
@@ -139,6 +141,9 @@ usage e = do
     , "operands differed beside the origins. watch writes the list of"
     , "those instructions once, for record --watch to read in runs of"
     , "one program rather than make anew in each."
+    , "--cpu has QEMU emulate MODEL (its -cpu, with any properties),"
+    , "which the dump records; a program choosing its code by the"
+    , "CPU's features takes the path MODEL's features lead it to."
     , "--object keeps origins in objects whose path contains TEXT;"
     , "--control names a run repeating the first run's secret, and"
     , "what differs in it is unsteady, not an origin."
@@ -152,7 +157,7 @@ usage e = do
 -- options before the program; "--" ends them
 options :: [String] -> Either String (Opts, [String])
 options = go (Opts Nothing Nothing Nothing Nothing Nothing Nothing
-              Nothing [] [] [] Nothing Nothing Nothing)
+              Nothing [] [] [] Nothing Nothing Nothing Nothing)
   where
     go o xs = case xs of
       ("--" : rest) -> Right (o, rest)
@@ -172,6 +177,7 @@ options = go (Opts Nothing Nothing Nothing Nothing Nothing Nothing
       ("--contract" : c : rest) -> go o { oContract = Just (T.pack c) } rest
       ("--objdump" : p : rest) -> go o { oObjdump = Just p } rest
       ("--watch" : p : rest) -> go o { oWatch = Just p } rest
+      ("--cpu" : c : rest) -> go o { oCpu = Just c } rest
       (x : _) | take 2 x == "--" -> Left ("unknown option: " <> x)
       _ -> Right (o, xs)
 
@@ -366,6 +372,7 @@ record o prog progArgs = do
       others = filter ((/= tunables) . fst) environment
   r <- try (withCreateProcess
          ((proc qemu (guest
+                     <> cpuArgs o
                      <> [ "-seed", "0"
                         , "-plugin", plugin <> ",out=" <> dump
                             <> maybe "" (",watch=" <>) watchFile
@@ -385,7 +392,12 @@ record o prog progArgs = do
       -- environment is QEMU's, with its own tunables restored
       appendRun dump (prog : progArgs)
         (others <> [ (tunables, v) | Just v <- [ own ] ]) c isa contract
+        (oCpu o)
       exitWith c
+
+-- QEMU's -cpu, where a model is named
+cpuArgs :: Opts -> [String]
+cpuArgs o = maybe [] (\m -> [ "-cpu", m ]) (oCpu o)
 
 refuseRecord :: String -> IO a
 refuseRecord e = do
@@ -421,7 +433,7 @@ watchList :: Opts -> FilePath -> Contract -> FilePath -> [String]
           -> IO T.Text
 watchList o qemu c prog progArgs = do
   objdump <- tool (oObjdump o) "VESTIGIA_OBJDUMP" "llvm-objdump"
-  loaded <- loadedObjects qemu prog progArgs
+  loaded <- loadedObjects qemu (cpuArgs o) prog progArgs
   objects <- fmap L.nub (traverse canonicalizePath (prog : loaded))
   let kept = [ p | p <- objects
                  , null (oObjects o)
@@ -434,10 +446,11 @@ watchList o qemu c prog progArgs = do
 
 -- the shared objects a program loads, as its dynamic loader resolves
 -- them, run under QEMU so that any ISA's are found
-loadedObjects :: FilePath -> FilePath -> [String] -> IO [FilePath]
-loadedObjects qemu prog progArgs = do
+loadedObjects :: FilePath -> [String] -> FilePath -> [String]
+              -> IO [FilePath]
+loadedObjects qemu cpu prog progArgs = do
   r <- try (readCreateProcessWithExitCode
-         (proc qemu ([ "-E", "LD_TRACE_LOADED_OBJECTS=1", prog ]
+         (proc qemu (cpu <> [ "-E", "LD_TRACE_LOADED_OBJECTS=1", prog ]
                      <> progArgs)) "")
   case r of
     Left e -> refuseRecord ("cannot run " <> qemu <> ": "
@@ -495,10 +508,10 @@ machineOf prog = do
 -- append a run's record to its dump (Vestigia.Diff.readDump): its
 -- arguments' bytes, its environment's variables and the bytes they
 -- take, its exit status, the guest's ISA, and any contract it was
--- recorded under
+-- recorded under and CPU model QEMU emulated
 appendRun :: FilePath -> [String] -> [(String, String)] -> ExitCode
-          -> String -> Maybe Contract -> IO ()
-appendRun dump args env code isa contract = do
+          -> String -> Maybe Contract -> Maybe String -> IO ()
+appendRun dump args env code isa contract cpu = do
   enc <- getFileSystemEncoding
   let bytes s = GF.withCStringLen enc s BS.packCStringLen
   as <- traverse bytes args
@@ -511,6 +524,7 @@ appendRun dump args env code isa contract = do
        , "X " <> show (exitStatus code)
        , "M " <> isa ]
     <> [ "G " <> T.unpack (contractName c) | Just c <- [ contract ] ]
+    <> [ "P " <> m | Just m <- [ cpu ] ]
   where
     byte w = case showHex w "" of
       [ d ] -> [ '0', d ]
@@ -552,6 +566,15 @@ diff o paths = do
         refuse (p <> " was recorded for another ISA or under another \
           \contract than " <> p0 <> "; runs compared must watch the \
           \same instructions")
+    [] -> pure ()
+  -- runs on other CPU models may take other code wherever a program
+  -- chooses its code by the CPU's features
+  case zip (paths <> oDesigned o <> oControls o)
+           (dumps <> designed <> controls) of
+    ((p0, first) : rest) -> for_ rest $ \(p, d) ->
+      when (dpCpu d /= dpCpu first) $
+        refuse (p <> " was recorded on another CPU model than " <> p0
+          <> "; runs compared must run on the same one")
     [] -> pure ()
   -- runs laid out apart differ wherever they touch memory, not by
   -- the secret: such runs are refused, not compared

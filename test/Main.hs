@@ -420,6 +420,11 @@ diffTests = testGroup "diff"
         (readDump (under dumpA <> "3333\nM x86_64\nG intel-doitm\n"))
       dpIsa a @?= Just "x86_64"
       dpContract a @?= Just "intel-doitm"
+      dpCpu a @?= Nothing
+      c <- either assertFailure pure
+        (readDump (dumpA <> "M aarch64\nP max,crypto=off\n"))
+      dpCpu c @?= Just "max,crypto=off"
+      dvCpu (diffDumps [ c, c ]) @?= Just "max,crypto=off"
       M.lookup 0x30 (dpTexts a) @?= Just "popcnt rax, rbx"
       let dv = diffDumps [ a, b ]
       -- not an origin: the contract says nothing either way of it

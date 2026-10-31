@@ -1,0 +1,65 @@
+QEMU's Arm CPU models all have the cryptographic extension (AES,
+PMULL, SHA1, SHA2, SHA3, SHA512, SM3, SM4), and none can be told to
+lack it, while CPUs built without it (a Raspberry Pi 4's Cortex-A72)
+run in the field: a program choosing its code by the CPU's features
+runs other code on them than any emulated CPU leads it to. crypto=off,
+on any AArch64 model, clears the extension's ID register fields, as
+such a CPU reports them: the instructions UNDEF, and a guest's HWCAP
+and ID register reads say they are absent.
+
+--- a/target/arm/cpu.c
++++ b/target/arm/cpu.c
+@@ -1581,6 +1581,41 @@
+     ARMCPU *cpu = ARM_CPU(obj);
+ 
+     return arm_feature(&cpu->env, ARM_FEATURE_AARCH64);
++}
++
++static bool aarch64_cpu_get_crypto(Object *obj, Error **errp)
++{
++    ARMCPU *cpu = ARM_CPU(obj);
++
++    return cpu_isar_feature(aa64_aes, cpu);
++}
++
++/*
++ * crypto=off removes the cryptographic extension (AES, PMULL, SHA1,
++ * SHA2, SHA3, SHA512, SM3, SM4), as a CPU built without it reports,
++ * from the ID registers: the instructions UNDEF, and a guest's
++ * HWCAP and ID register reads say they are absent.
++ */
++static void aarch64_cpu_set_crypto(Object *obj, bool value, Error **errp)
++{
++    ARMCPU *cpu = ARM_CPU(obj);
++
++    if (value) {
++        if (!cpu_isar_feature(aa64_aes, cpu)) {
++            error_setg(errp, "'crypto' feature cannot be enabled on "
++                       "this CPU");
++        }
++        return;
++    }
++    FIELD_DP64_IDREG(&cpu->isar, ID_AA64ISAR0, AES, 0);
++    FIELD_DP64_IDREG(&cpu->isar, ID_AA64ISAR0, SHA1, 0);
++    FIELD_DP64_IDREG(&cpu->isar, ID_AA64ISAR0, SHA2, 0);
++    FIELD_DP64_IDREG(&cpu->isar, ID_AA64ISAR0, SHA3, 0);
++    FIELD_DP64_IDREG(&cpu->isar, ID_AA64ISAR0, SM3, 0);
++    FIELD_DP64_IDREG(&cpu->isar, ID_AA64ISAR0, SM4, 0);
++    FIELD_DP32_IDREG(&cpu->isar, ID_ISAR5, AES, 0);
++    FIELD_DP32_IDREG(&cpu->isar, ID_ISAR5, SHA1, 0);
++    FIELD_DP32_IDREG(&cpu->isar, ID_ISAR5, SHA2, 0);
+ }
+ 
+ static void aarch64_cpu_set_aarch64(Object *obj, bool value, Error **errp)
+@@ -1738,6 +1773,11 @@
+         object_property_set_description(obj, "aarch64",
+                                         "Set on/off to enable/disable aarch64 "
+                                         "execution state ");
++        object_property_add_bool(obj, "crypto", aarch64_cpu_get_crypto,
++                                 aarch64_cpu_set_crypto);
++        object_property_set_description(obj, "crypto",
++                                        "Set off to remove the "
++                                        "cryptographic extension");
+     }
+ #ifndef CONFIG_USER_ONLY
+     if (arm_feature(&cpu->env, ARM_FEATURE_CBAR) ||
