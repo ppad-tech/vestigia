@@ -1,6 +1,6 @@
 # Changelog
 
-- 0.2.0 (unreleased)
+- 0.2.0 (2026-10-31)
   * Data-independent-timing contracts: `record --contract arm-dit`
     or `intel-doitm`, with `--object` and `--objdump`, has the plugin
     fingerprint the operands of every instruction outside the ISA's
