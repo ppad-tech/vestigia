@@ -1,6 +1,7 @@
 # vestigia
 
 ![](https://img.shields.io/badge/license-MIT-brightgreen)
+[![](https://img.shields.io/badge/haddock-vestigia-lightblue)](https://docs.ppad.tech/vestigia)
 
 Finds where a program's execution depended on a secret, by running
 it.
