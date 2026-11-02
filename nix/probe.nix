@@ -33,6 +33,12 @@ let
     cc -O0 -pthread -o $out/bin/threads ${../etc/probe/threads.c}
   '';
 
+  pid = pkgs.runCommandCC "vestigia-probe-pid" { } ''
+    mkdir -p $out/bin
+    cc -O0 -o $out/bin/pid ${../etc/probe/pid.c}
+    cc -O0 -DABORT -o $out/bin/abort ${../etc/probe/pid.c}
+  '';
+
   secrets = [ "00000005" "0000003a" "000000c3" ];
   objects = [ "/bin/probe" ];
 
@@ -156,6 +162,23 @@ pkgs.runCommand "vestigia-probe-check" {
     exit 1
   fi
   grep -q 'number or length' refusal
+
+  # every run sees one pid, its own namespace's second: two runs of a
+  # guest that branches on its pid differ nowhere in it
+  $v record --dump pid-1 -- ${pid}/bin/pid
+  $v record --dump pid-2 -- ${pid}/bin/pid
+  $v diff --object /bin/pid --out pid.json pid-1 pid-2
+  check pid.json '.origins | length' '0'
+
+  # a guest a signal ends ends its run as the signal does, recorded
+  set +e
+  $v record --dump abort -- ${pid}/bin/abort
+  ended=$?
+  set -e
+  if [ "$ended" != 134 ]; then
+    echo "probe: an aborted guest's run ended $ended, not 134" >&2
+    exit 1
+  fi
 
   # a guest that starts a second thread is stopped, and its dump
   # refused

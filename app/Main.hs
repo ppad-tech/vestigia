@@ -337,6 +337,12 @@ record o prog progArgs = do
   qemu <- tool (oQemu o) ("VESTIGIA_QEMU_" <> fmap toUpper isa)
     ("qemu-" <> isa)
   plugin <- tool (oPlugin o) "VESTIGIA_PLUGIN" "libvestigia-qemu.so"
+  -- runs to be compared must also see one process: a guest that
+  -- keeps its pid would otherwise differ from run to run. Each run is
+  -- started in a PID namespace of its own, QEMU its second process in
+  -- every run (vestigia-init, its first, says how QEMU ended)
+  unshare <- tool Nothing "VESTIGIA_UNSHARE" "unshare"
+  start <- tool Nothing "VESTIGIA_INIT" "vestigia-init"
   -- under a contract, the instructions outside it in the objects
   -- under audit, for the plugin to watch: the list given, made once
   -- for runs of one program, or one made here
@@ -370,8 +376,14 @@ record o prog progArgs = do
       guest = maybe [ "-U", tunables ]
         (\v -> [ "-E", tunables <> "=" <> v ]) own
       others = filter ((/= tunables) . fst) environment
+  tmp <- getTemporaryDirectory
+  (ended, h) <- openTempFile tmp "vestigia.status"
+  hClose h
   r <- try (withCreateProcess
-         ((proc qemu (guest
+         ((proc unshare ([ "--user", "--map-current-user", "--pid"
+                         , "--fork", "--kill-child", "--"
+                         , start, ended, qemu ]
+                     <> guest
                      <> cpuArgs o
                      <> [ "-seed", "0"
                         , "-plugin", plugin <> ",out=" <> dump
@@ -381,12 +393,21 @@ record o prog progArgs = do
             { P.env = Just ((tunables, host) : others) })
          (\_ _ _ ph -> waitForProcess ph))
   for_ watching (\(w, made) -> when made (removeFile w))
-  case r of
-    Left e -> do
-      hPutStrLn stderr ("vestigia: cannot run " <> qemu <> ": "
+  status <- readMaybe . T.unpack . T.strip <$> TIO.readFile ended
+    :: IO (Maybe Int)
+  removeFile ended
+  case (r, status) of
+    (Left e, _) -> do
+      hPutStrLn stderr ("vestigia: cannot run " <> unshare <> ": "
         <> show (e :: IOException))
       exitWith (ExitFailure 2)
-    Right c -> do
+    (Right u, Nothing) -> do
+      hPutStrLn stderr ("vestigia: " <> qemu <> " was not started in a "
+        <> "PID namespace of its own (" <> unshare <> ": " <> show u
+        <> ")")
+      exitWith (ExitFailure 2)
+    (Right _, Just n) -> do
+      let c = if n == 0 then ExitSuccess else ExitFailure n
       -- how the run was made, by which diff tells runs that differ
       -- in the secret alone from runs laid out apart: the guest's
       -- environment is QEMU's, with its own tunables restored
