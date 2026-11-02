@@ -86,7 +86,9 @@ different number of times are reported as downstream.
   `run` and `read`).
 
 `record` disables address-space randomisation and seeds the guest's
-entropy so that runs lay memory out alike. `diff` refuses runs whose
+entropy so that runs lay memory out alike, and starts each run in a
+PID namespace of its own (util-linux `unshare`, unprivileged user
+namespaces) so that every run sees one pid. `diff` refuses runs whose
 program, argument shape, environment size, or object layout differ.
 
 ### Contracts

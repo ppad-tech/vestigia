@@ -47,6 +47,13 @@ let
       $(pkg-config --cflags glib-2.0) -I${qemu}/include \
       -o $out/lib/libvestigia-qemu.so ${src}/plugin/vestigia-qemu.c
   '';
+  # the first process of each recorded run's own PID namespace, which
+  # starts QEMU and says how it ended (record)
+  init = pkgs.runCommandCC "vestigia-init" { } ''
+    mkdir -p $out/bin
+    cc -O2 -Wall -Werror -o $out/bin/vestigia-init \
+      ${src}/init/vestigia-init.c
+  '';
   # the harness-side header; a harness build also needs
   # valgrind's own (valgrindDev)
   include = pkgs.runCommand "vestigia-include" { } ''
@@ -69,6 +76,8 @@ let
         "--set-default VESTIGIA_QEMU_AARCH64 ${qemu}/bin/qemu-aarch64"
         "--set-default VESTIGIA_PLUGIN"
         "${plugin}/lib/libvestigia-qemu.so"
+        "--set-default VESTIGIA_UNSHARE ${pkgs.util-linux}/bin/unshare"
+        "--set-default VESTIGIA_INIT ${init}/bin/vestigia-init"
         "--set-default VESTIGIA_ADDR2LINE"
         "${pkgs.llvm}/bin/llvm-addr2line"
         "--set-default VESTIGIA_OBJDUMP"
