@@ -1,5 +1,14 @@
 # Changelog
 
+- 0.2.1 (2026-11-02)
+  * `record` starts each run in a PID namespace of its own, so that
+    every run sees one pid: a guest that keeps its pid (a random
+    generator noting it at seeding, as Mbed TLS's does) differed from
+    run to run where no secret did. QEMU is the namespace's second
+    process; its first (vestigia-init) starts it and says how it
+    ended, a fatal signal included. Needs util-linux's `unshare` and
+    unprivileged user namespaces (VESTIGIA_UNSHARE, VESTIGIA_INIT).
+
 - 0.2.0 (2026-10-31)
   * Data-independent-timing contracts: `record --contract arm-dit`
     or `intel-doitm`, with `--object` and `--objdump`, has the plugin
