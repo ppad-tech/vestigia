@@ -1,5 +1,12 @@
 # Changelog
 
+- 0.2.3 (unreleased)
+  * `traceOf` and `diffOf` take an `env`, set for every run of the
+    harness: a runtime that reads its settings as it starts (Go's
+    GOMAXPROCS and GOGC) is given them there. A Go harness's runs of
+    one secret, recorded without them, laid memory out differently
+    from run to run where no secret did.
+
 - 0.2.2 (2026-11-03)
   * `record` runs a guest that starts threads, recording its own
     thread alone, the one its main function runs on; the others run

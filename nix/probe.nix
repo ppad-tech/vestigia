@@ -33,6 +33,23 @@ let
     cc -O0 -pthread -o $out/bin/threads ${../etc/probe/threads.c}
   '';
 
+  envGuest = pkgs.runCommandCC "vestigia-probe-env" { } ''
+    mkdir -p $out/bin
+    cc -O0 -I${vestigia.include}/include \
+      -I${vestigia.valgrindDev}/include -o $out/bin/env \
+      ${../etc/probe/env.c} ${vestigia.include}/include/vestigia.c
+  '';
+
+  # a trace's env reaches the harness's runs, under either instrument
+  envOf = f: f {
+    name = "probe-env";
+    harness = "${envGuest}/bin/env";
+    runs = [ [ ] [ ] ];
+    env = { VESTIGIA_PROBE_ENV = "set"; };
+  };
+  envDiff = envOf vestigia.diffOf;
+  envTrace = envOf vestigia.traceOf;
+
   mark = pkgs.runCommandCC "vestigia-probe-mark" { } ''
     mkdir -p $out/bin
     cc -O0 -g -I${vestigia.include}/include \
@@ -207,6 +224,17 @@ pkgs.runCommand "vestigia-probe-check" {
     echo "probe: a dump holds an instruction its thread never ran" >&2
     exit 1
   fi
+
+  # a trace's env is the harness's: every run of each instrument
+  # found it
+  for f in ${envDiff}/status-1 ${envDiff}/status-2 \
+           ${envDiff}/status-control-1 \
+           ${envTrace}/status-1 ${envTrace}/status-2; do
+    if [ "$(cat $f)" != 0 ]; then
+      echo "probe: a run did not see its trace's env ($f)" >&2
+      exit 1
+    fi
+  done
 
   # the trace begins at a secret's first mark: a guest branching on
   # its secret's digits as it reads them, then once on the secret

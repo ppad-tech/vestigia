@@ -95,11 +95,14 @@ let
   # report over all of them. `runs` is a list of argument lists, the
   # secrets of the trace; memcheck sees only the path a run takes, so
   # each run adds the sites on its own. `objects` keeps sites in
-  # objects whose path contains one of them. A harness that fails
-  # still leaves a report of what ran; a run vestigia could not read
-  # fails the build.
-  traceOf = { name, harness, runs, objects ? [ ] }:
-    pkgs.runCommand "vestigia-trace-${name}" { } ''
+  # objects whose path contains one of them. `env` is set for every
+  # run: a runtime that reads its settings as it starts (Go's
+  # GOMAXPROCS and GOGC, say) is given them here, as nothing the
+  # harness runs can set them in time. A harness that fails still
+  # leaves a report of what ran; a run vestigia could not read fails
+  # the build.
+  traceOf = { name, harness, runs, objects ? [ ], env ? { } }:
+    pkgs.runCommand "vestigia-trace-${name}" env ''
       mkdir -p $out
       start=$(date +%s%N)
       ${lib.concatImapStrings (k: args: ''
@@ -135,18 +138,19 @@ let
   # kept as `watch`) for every run to read (record --watch). On a
   # `cpu`, every run is recorded with QEMU emulating that model (its
   # -cpu, properties and all), so that a harness choosing its code by
-  # the CPU's features runs the code that model leads it to.
+  # the CPU's features runs the code that model leads it to. `env` is
+  # set for every run, as traceOf's is.
   # A run's own failure leaves its status; a dump vestigia cannot read
   # fails the build.
   diffOf = { name, harness, runs, objects ? [ ], designed ? [ ]
-           , contract ? null, cpu ? null }:
+           , contract ? null, cpu ? null, env ? { } }:
     let
       model = lib.optionalString (cpu != null)
         "--cpu ${lib.escapeShellArg cpu} ";
       watch = lib.optionalString (contract != null)
         "--contract ${lib.escapeShellArg contract} --watch $out/watch ";
     in
-    pkgs.runCommand "vestigia-diff-${name}" { } ''
+    pkgs.runCommand "vestigia-diff-${name}" env ''
       mkdir -p $out
       start=$(date +%s%N)
       ${lib.optionalString (contract != null) ''
