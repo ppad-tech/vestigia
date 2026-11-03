@@ -1,6 +1,6 @@
 # Changelog
 
-- 0.2.2 (unreleased)
+- 0.2.2 (2026-11-03)
   * `record` runs a guest that starts threads, recording its own
     thread alone, the one its main function runs on; the others run
     unrecorded. The plugin appends how many threads ran, and `diff`

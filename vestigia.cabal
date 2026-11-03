@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               vestigia
-version:            0.2.1
+version:            0.2.2
 synopsis:           Where an execution depended on a secret.
 license:            MIT
 license-file:       LICENSE
