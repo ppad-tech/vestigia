@@ -49,7 +49,8 @@
  * stub gives it, the bits read from its low bit; <memory> is 1 where
  * the instruction names memory.
  *
- * At exit it writes, to the file named by its `out` argument:
+ * At exit it writes, to the file named by its `out` argument, of
+ * each instruction the recorded thread ran since the trace began:
  *
  *   I <pc> <count> <accesses> <fingerprint> <order> <object> <address>
  *   E <from> <to> <count>
@@ -950,6 +951,9 @@ static void at_exit(qemu_plugin_id_t id, void *p) {
   g_hash_table_iter_init(&it, insns);
   while (g_hash_table_iter_next(&it, &key, &val)) {
     Insn *i = val;
+    /* made, but not run by the recorded thread since the trace
+       began: another thread's, or what ran before it */
+    if (i->count == 0) continue;
     const Region *r = region_of(rs, i->haddr);
     Segments *s = r != NULL ? segments_of(segs, r->path) : NULL;
     uint64_t addr;

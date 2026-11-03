@@ -201,6 +201,12 @@ pkgs.runCommand "vestigia-probe-check" {
   $v diff --object /bin/threads --out threads.json threads-1 threads-2
   check threads.json '.origins | length' '0'
   check threads.json '.threads' '2'
+  # and a dump holds what the recorded thread ran: the second's
+  # instructions, made but never run by it, are not there
+  if grep -q '^I [0-9a-f]* 0 ' threads-1 threads-2; then
+    echo "probe: a dump holds an instruction its thread never ran" >&2
+    exit 1
+  fi
 
   # the trace begins at a secret's first mark: a guest branching on
   # its secret's digits as it reads them, then once on the secret
