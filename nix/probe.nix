@@ -186,8 +186,9 @@ pkgs.runCommand "vestigia-probe-check" {
   fi
 
   # a guest that starts a second thread is recorded on its own
-  # thread alone: the second's spinning, which the host's scheduling
-  # varies, is in neither dump, and the report says two threads ran
+  # thread alone, which runs alone: what the second does as the host
+  # lets it is in neither dump, nor in what the first reads of it, and
+  # the report says two threads ran
   $v record --dump threads-1 -- ${threads}/bin/threads
   $v record --dump threads-2 -- ${threads}/bin/threads
   $v diff --object /bin/threads --out threads.json threads-1 threads-2

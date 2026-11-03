@@ -77,11 +77,22 @@
  * One guest thread is recorded: the program's own, the first, on
  * which its main function runs. Other threads (a language runtime's
  * collector and scheduler, say) run unrecorded, their instructions
- * counted nowhere, so that what they do as time allows does not
- * enter the trace; a harness calls the code under audit on its own
+ * counted nowhere; a harness calls the code under audit on its own
  * thread. Each thread is a vCPU of its own, and any of them may
  * translate code, so the instructions are made under a lock; what
  * an instruction does is kept by the recorded thread alone.
+ *
+ * Nor does what the others do as time allows reach the recorded
+ * thread by the state they share: the recorded thread runs alone.
+ * The others run only while it is blocked in a system call (one that
+ * waits: a futex wait, a sleep, a yield, a poll), and it goes on from
+ * one only once each of them is blocked in one too, or gone; one
+ * that would go on while it runs waits first, at its next system
+ * call's return, or as it starts. What the recorded thread finds in
+ * memory is then what the others leave when they have nothing left
+ * to do but wait, whenever the host ran them. A thread that never
+ * blocks holds the recorded one back WAIT_SECONDS at most, which the
+ * run reports on its standard error.
  */
 #include <elf.h>
 #include <glib.h>
@@ -163,6 +174,14 @@ static char *out_path;
 static gint vcpus;        /* the guest's threads, a vCPU each */
 static unsigned int recorded; /* the program's own thread's vCPU */
 static GMutex translating;  /* held while instructions are made */
+static GMutex turns;        /* held while threads take their turns */
+static GCond turned;        /* signalled as a turn passes */
+static gboolean alone = TRUE; /* the recorded thread is running */
+static gboolean gone;       /* the recorded thread has ended */
+static int running;         /* other threads not blocked, nor waiting */
+static gboolean warned;     /* a wait for the others timed out */
+static __thread gboolean waits; /* this thread's call is one that waits */
+static __thread gboolean counted; /* this thread is among `running` */
 static gboolean aarch64;  /* the guest's ISA: aarch64, else x86_64 */
 static GArray *contexts;  /* Context by number, 0 the program's own */
 static GHashTable *interned; /* Context -> its number */
@@ -472,13 +491,106 @@ static void find_registers(void) {
   }
 }
 
-/* the first vCPU is the program's own thread, which is recorded */
+#define WAIT_SECONDS 10
+
+/* another thread, before it runs: it waits while the recorded one
+   runs alone */
+static void take_turn(void) {
+  g_mutex_lock(&turns);
+  while (alone && !gone) g_cond_wait(&turned, &turns);
+  running++;
+  counted = TRUE;
+  g_mutex_unlock(&turns);
+}
+
+/* the recorded thread, leaving a call that waits: it goes on once
+   each other thread is blocked, waiting, or gone */
+static void run_alone(void) {
+  gint64 end = g_get_monotonic_time() + WAIT_SECONDS * G_TIME_SPAN_SECOND;
+  g_mutex_lock(&turns);
+  while (running > 0)
+    if (!g_cond_wait_until(&turned, &turns, end)) {
+      if (!warned)
+        fprintf(stderr, "vestigia-qemu: a thread did not block within "
+                "%d seconds; the recorded thread went on beside it\n",
+                WAIT_SECONDS);
+      warned = TRUE;
+      break;
+    }
+  alone = TRUE;
+  g_mutex_unlock(&turns);
+}
+
+/* the system calls that may wait, by the guest's numbers: a futex
+   wait, a sleep, a yield, a poll, a wait for a child or a signal */
+static gboolean call_waits(int64_t num, uint64_t a2) {
+  static const int64_t x86_64[] = { 7, 23, 24, 34, 35, 61, 128, 130,
+                                    230, 232, 247, 270, 271, 281, 441,
+                                    449 };
+  static const int64_t a64[] = { 22, 72, 73, 95, 101, 115, 124, 133,
+                                 137, 260, 441, 449 };
+  const int64_t *t = aarch64 ? a64 : x86_64;
+  size_t n = aarch64 ? G_N_ELEMENTS(a64) : G_N_ELEMENTS(x86_64);
+  if (num == (aarch64 ? 98 : 202)) {
+    /* FUTEX_WAIT, LOCK_PI, WAIT_BITSET, WAIT_REQUEUE_PI, LOCK_PI2 */
+    uint64_t cmd = a2 & 127;
+    return cmd == 0 || cmd == 6 || cmd == 9 || cmd == 11 || cmd == 13;
+  }
+  for (size_t k = 0; k < n; k++)
+    if (t[k] == num) return TRUE;
+  return FALSE;
+}
+
+static gboolean call_exits(int64_t num) {
+  return num == (aarch64 ? 93 : 60);
+}
+
+static void on_syscall(qemu_plugin_id_t id, unsigned int vcpu,
+                       int64_t num, uint64_t a1, uint64_t a2,
+                       uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
+                       uint64_t a7, uint64_t a8) {
+  (void)id;
+  (void)a1;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  (void)a6;
+  (void)a7;
+  (void)a8;
+  waits = call_waits(num, a2);
+  if (!waits && !call_exits(num)) return;
+  g_mutex_lock(&turns);
+  if (vcpu == recorded) {
+    alone = FALSE;
+    if (call_exits(num)) gone = TRUE;
+  } else if (counted) {
+    running--;
+    counted = FALSE;
+  }
+  g_cond_broadcast(&turned);
+  g_mutex_unlock(&turns);
+}
+
+static void on_syscall_ret(qemu_plugin_id_t id, unsigned int vcpu,
+                           int64_t num, int64_t ret) {
+  (void)id;
+  (void)num;
+  (void)ret;
+  if (!waits) return;
+  waits = FALSE;
+  if (vcpu == recorded) run_alone();
+  else take_turn();
+}
+
+/* the first vCPU is the program's own thread, which is recorded; any
+   other takes its turn before it runs on */
 static void on_vcpu_init(qemu_plugin_id_t id, unsigned int vcpu) {
   (void)id;
   if (g_atomic_int_add(&vcpus, 1) == 0) {
     recorded = vcpu;
     find_registers();
-  }
+  } else
+    take_turn();
 }
 
 static const Watch *watched(uintptr_t haddr);
@@ -819,6 +931,8 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
     g_array_append_val(contexts, own);
   }
   qemu_plugin_register_vcpu_init_cb(id, on_vcpu_init);
+  qemu_plugin_register_vcpu_syscall_cb(id, on_syscall);
+  qemu_plugin_register_vcpu_syscall_ret_cb(id, on_syscall_ret);
   qemu_plugin_register_vcpu_tb_trans_cb(id, on_translate);
   qemu_plugin_register_atexit_cb(id, at_exit, NULL);
   return 0;
