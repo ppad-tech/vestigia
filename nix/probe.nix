@@ -33,6 +33,11 @@ let
     cc -O0 -pthread -o $out/bin/threads ${../etc/probe/threads.c}
   '';
 
+  clock = pkgs.runCommandCC "vestigia-probe-clock" { } ''
+    mkdir -p $out/bin
+    cc -O0 -o $out/bin/clock ${../etc/probe/clock.c}
+  '';
+
   pid = pkgs.runCommandCC "vestigia-probe-pid" { } ''
     mkdir -p $out/bin
     cc -O0 -o $out/bin/pid ${../etc/probe/pid.c}
@@ -180,16 +185,20 @@ pkgs.runCommand "vestigia-probe-check" {
     exit 1
   fi
 
-  # a guest that starts a second thread is stopped, and its dump
-  # refused
-  if $v record --dump threads -- ${threads}/bin/threads; then
-    echo "probe: a guest's second thread was recorded" >&2
-    exit 1
-  fi
-  if $v diff threads threads 2> refusal; then
-    echo "probe: a stopped guest's dump was compared" >&2
-    exit 1
-  fi
-  grep -q 'second thread' refusal
+  # a guest that starts a second thread is recorded on its own
+  # thread alone: the second's spinning, which the host's scheduling
+  # varies, is in neither dump, and the report says two threads ran
+  $v record --dump threads-1 -- ${threads}/bin/threads
+  $v record --dump threads-2 -- ${threads}/bin/threads
+  $v diff --object /bin/threads --out threads.json threads-1 threads-2
+  check threads.json '.origins | length' '0'
+  check threads.json '.threads' '2'
+
+  # a guest that spins until a millisecond has passed spins alike in
+  # every run: its clock advances by its own readings
+  $v record --dump clock-1 -- ${clock}/bin/clock
+  $v record --dump clock-2 -- ${clock}/bin/clock
+  $v diff --object /bin/clock --out clock.json clock-1 clock-2
+  check clock.json '.origins | length' '0'
   touch $out
 ''
