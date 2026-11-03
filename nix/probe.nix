@@ -33,6 +33,18 @@ let
     cc -O0 -pthread -o $out/bin/threads ${../etc/probe/threads.c}
   '';
 
+  mark = pkgs.runCommandCC "vestigia-probe-mark" { } ''
+    mkdir -p $out/bin
+    cc -O0 -g -I${vestigia.include}/include \
+      -I${vestigia.valgrindDev}/include -o $out/bin/mark \
+      ${../etc/probe/mark.c} ${vestigia.include}/include/vestigia.c
+  '';
+
+  clock = pkgs.runCommandCC "vestigia-probe-clock" { } ''
+    mkdir -p $out/bin
+    cc -O0 -o $out/bin/clock ${../etc/probe/clock.c}
+  '';
+
   pid = pkgs.runCommandCC "vestigia-probe-pid" { } ''
     mkdir -p $out/bin
     cc -O0 -o $out/bin/pid ${../etc/probe/pid.c}
@@ -180,16 +192,36 @@ pkgs.runCommand "vestigia-probe-check" {
     exit 1
   fi
 
-  # a guest that starts a second thread is stopped, and its dump
-  # refused
-  if $v record --dump threads -- ${threads}/bin/threads; then
-    echo "probe: a guest's second thread was recorded" >&2
+  # a guest that starts a second thread is recorded on its own
+  # thread alone, which runs alone: what the second does as the host
+  # lets it is in neither dump, nor in what the first reads of it, and
+  # the report says two threads ran
+  $v record --dump threads-1 -- ${threads}/bin/threads
+  $v record --dump threads-2 -- ${threads}/bin/threads
+  $v diff --object /bin/threads --out threads.json threads-1 threads-2
+  check threads.json '.origins | length' '0'
+  check threads.json '.threads' '2'
+  # and a dump holds what the recorded thread ran: the second's
+  # instructions, made but never run by it, are not there
+  if grep -q '^I [0-9a-f]* 0 ' threads-1 threads-2; then
+    echo "probe: a dump holds an instruction its thread never ran" >&2
     exit 1
   fi
-  if $v diff threads threads 2> refusal; then
-    echo "probe: a stopped guest's dump was compared" >&2
-    exit 1
-  fi
-  grep -q 'second thread' refusal
+
+  # the trace begins at a secret's first mark: a guest branching on
+  # its secret's digits as it reads them, then once on the secret
+  # marked, differs in the branch after the mark alone
+  $v record --dump mark-1 -- ${mark}/bin/mark 3c
+  $v record --dump mark-2 -- ${mark}/bin/mark a5
+  $v diff --object /bin/mark --out mark.json mark-1 mark-2
+  check mark.json '[.origins[] | [.class, .frames[0].function]] | unique' \
+    '[["control","after"]]'
+
+  # a guest that spins until a millisecond has passed spins alike in
+  # every run: its clock advances by its own readings
+  $v record --dump clock-1 -- ${clock}/bin/clock
+  $v record --dump clock-2 -- ${clock}/bin/clock
+  $v diff --object /bin/clock --out clock.json clock-1 clock-2
+  check clock.json '.origins | length' '0'
   touch $out
 ''

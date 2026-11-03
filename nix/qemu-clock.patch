@@ -1,0 +1,78 @@
+QEMU's user mode answers a guest's clocks from the host's, so two runs
+of one program read different times, and a program that decides by
+time (a runtime's scheduler preempting what has run 10ms, a collector
+pacing itself) decides differently in each. The host still answers
+the call, so its clock and pointers are checked and its errors chosen
+as the kernel would; the time it returned is then the calling
+thread's own, which advances by a microsecond at each reading.
+
+--- a/linux-user/syscall.c	2026-10-28 08:09:52
++++ b/linux-user/syscall.c	2026-10-28 08:09:52
+@@ -9218,7 +9218,26 @@
+  * to have a single return point, so that actions, such as logging
+  * of syscall results, can be performed.
+  * All errnos that do_syscall() returns must be -TARGET_<errcode>.
++ */
++/*
++ * The guest's clocks read a time of the calling thread's own, which
++ * advances by a microsecond at each reading: two runs of one program
++ * read the same times whatever the host's clock does, and a thread's
++ * clock never runs back. The wall clocks count from a fixed date, the
++ * others from a second.
+  */
++static __thread uint64_t guest_clock_reads;
++
++static void guest_clock(clockid_t clock, struct timespec *ts)
++{
++    uint64_t ns = ++guest_clock_reads * 1000;
++    uint64_t base = clock == CLOCK_REALTIME || clock == CLOCK_REALTIME_COARSE
++                    || clock == CLOCK_TAI ? 1767225600 : 1;
++
++    ts->tv_sec = base + ns / 1000000000;
++    ts->tv_nsec = ns % 1000000000;
++}
++
+ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
+                             abi_long arg2, abi_long arg3, abi_long arg4,
+                             abi_long arg5, abi_long arg6, abi_long arg7,
+@@ -9507,6 +9526,12 @@
+         {
+             time_t host_time;
+             ret = get_errno(time(&host_time));
++            if (!is_error(ret)) {
++                struct timespec ts;
++
++                guest_clock(CLOCK_REALTIME, &ts);
++                host_time = ret = ts.tv_sec;
++            }
+             if (!is_error(ret)
+                 && arg1
+                 && put_user_sal(host_time, arg1))
+@@ -10475,6 +10500,11 @@
+ 
+             ret = get_errno(gettimeofday(&tv, &tz));
+             if (!is_error(ret)) {
++                struct timespec ts;
++
++                guest_clock(CLOCK_REALTIME, &ts);
++                tv.tv_sec = ts.tv_sec;
++                tv.tv_usec = ts.tv_nsec / 1000;
+                 if (arg1 && copy_to_user_timeval(arg1, &tv)) {
+                     return -TARGET_EFAULT;
+                 }
+@@ -12848,6 +12878,7 @@
+         struct timespec ts;
+         ret = get_errno(clock_gettime(arg1, &ts));
+         if (!is_error(ret)) {
++            guest_clock(arg1, &ts);
+             ret = host_to_target_timespec(arg2, &ts);
+         }
+         return ret;
+@@ -12859,6 +12890,7 @@
+         struct timespec ts;
+         ret = get_errno(clock_gettime(arg1, &ts));
+         if (!is_error(ret)) {
++            guest_clock(arg1, &ts);
+             ret = host_to_target_timespec64(arg2, &ts);
+         }
+         return ret;

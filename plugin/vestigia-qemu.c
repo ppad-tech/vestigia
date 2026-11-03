@@ -49,7 +49,8 @@
  * stub gives it, the bits read from its low bit; <memory> is 1 where
  * the instruction names memory.
  *
- * At exit it writes, to the file named by its `out` argument:
+ * At exit it writes, to the file named by its `out` argument, of
+ * each instruction the recorded thread ran since the trace began:
  *
  *   I <pc> <count> <accesses> <fingerprint> <order> <object> <address>
  *   E <from> <to> <count>
@@ -68,12 +69,38 @@
  * the file; in an executable linked at a fixed address it is not. A
  * context is the call at <call> made in context <caller>, context 0
  * being the program's own; <partial> is 1 where an instruction ran in
- * more contexts than are kept. A guest that started a second thread
- * gets the line `T 2` alone.
+ * more contexts than are kept. Last comes
  *
- * The state below is unlocked, so one guest thread is recorded: a
- * guest that starts a second one is stopped there, its dump saying
- * so, rather than recorded by threads racing on it.
+ *   T <threads>
+ *
+ * the number of threads the guest started, its own among them.
+ *
+ * The trace begins where the recorded thread first marks a secret:
+ * where it makes memcheck's client request MAKE_MEM_UNDEFINED, as a
+ * harness's vestigia_secret does, before the code under audit is
+ * called. What ran before it (a runtime coming up, a harness reading
+ * its arguments) is set aside, since no secret it could depend on
+ * was yet handed over. A run that never marks one is recorded whole.
+ *
+ * One guest thread is recorded: the program's own, the first, on
+ * which its main function runs. Other threads (a language runtime's
+ * collector and scheduler, say) run unrecorded, their instructions
+ * counted nowhere; a harness calls the code under audit on its own
+ * thread. Each thread is a vCPU of its own, and any of them may
+ * translate code, so the instructions are made under a lock; what
+ * an instruction does is kept by the recorded thread alone.
+ *
+ * Nor does what the others do as time allows reach the recorded
+ * thread by the state they share: the recorded thread runs alone.
+ * The others run only while it is blocked in a system call (one that
+ * waits: a futex wait, a sleep, a yield, a poll), and it goes on from
+ * one only once each of them is blocked in one too, or gone; one
+ * that would go on while it runs waits first, at its next system
+ * call's return, or as it starts. What the recorded thread finds in
+ * memory is then what the others leave when they have nothing left
+ * to do but wait, whenever the host ran them. A thread that never
+ * blocks holds the recorded one back WAIT_SECONDS at most, which the
+ * run reports on its standard error.
  */
 #include <elf.h>
 #include <glib.h>
@@ -153,6 +180,17 @@ static GHashTable *insns; /* pc -> Insn */
 static Insn *prev;        /* the instruction executed last */
 static char *out_path;
 static gint vcpus;        /* the guest's threads, a vCPU each */
+static unsigned int recorded; /* the program's own thread's vCPU */
+static GMutex translating;  /* held while instructions are made */
+static GMutex turns;        /* held while threads take their turns */
+static GCond turned;        /* signalled as a turn passes */
+static gboolean alone = TRUE; /* the recorded thread is running */
+static gboolean gone;       /* the recorded thread has ended */
+static int running;         /* other threads not blocked, nor waiting */
+static gboolean warned;     /* a wait for the others timed out */
+static __thread gboolean waits; /* this thread's call is one that waits */
+static __thread gboolean counted; /* this thread is among `running` */
+static gboolean begun;      /* a secret has been marked: the trace began */
 static gboolean aarch64;  /* the guest's ISA: aarch64, else x86_64 */
 static GArray *contexts;  /* Context by number, 0 the program's own */
 static GHashTable *interned; /* Context -> its number */
@@ -324,7 +362,7 @@ static void note_context(Insn *i) {
 
 static void on_exec(unsigned int vcpu, void *udata) {
   Insn *i = udata;
-  (void)vcpu;
+  if (vcpu != recorded) return;
   if (prev != NULL) {
     prev->order = (prev->order ^ i->pc) * fnv_prime;
     if (i->pc != prev->pc + prev->size) transfer(prev, i->pc);
@@ -334,6 +372,35 @@ static void on_exec(unsigned int vcpu, void *udata) {
   prev = i;
   i->count++;
   if (i->origin && i->last != current) note_context(i);
+}
+
+/* what has been recorded set aside: the trace begins anew. Other
+   threads may be making instructions, so under their lock */
+static void begin(void) {
+  GHashTableIter it;
+  gpointer key, val;
+  begun = TRUE;
+  g_mutex_lock(&translating);
+  g_hash_table_iter_init(&it, insns);
+  while (g_hash_table_iter_next(&it, &key, &val)) {
+    Insn *i = val;
+    i->count = 0;
+    i->accesses = 0;
+    i->fingerprint = fnv_offset;
+    i->order = fnv_offset;
+    i->operands = fnv_offset;
+    g_hash_table_remove_all(i->succ);
+    i->last = UINT32_MAX;
+    i->ncontexts = 0;
+    i->partial = 0;
+    i->made_in = UINT32_MAX;
+  }
+  g_mutex_unlock(&translating);
+  g_array_set_size(contexts, 1);
+  g_hash_table_remove_all(interned);
+  g_array_set_size(calls, 0);
+  current = 0;
+  prev = NULL;
 }
 
 static void mix(Insn *i, uint64_t v) {
@@ -351,10 +418,30 @@ static uint64_t read_gpr(int r) {
   return v;
 }
 
+/* memcheck's request MAKE_MEM_UNDEFINED, VG_USERREQ_TOOL_BASE('M','C')
+   + 1 */
+#define MAKE_MEM_UNDEFINED 0x4d430001
+
+/* a client request made: its arguments (the request, then what it
+   takes: an address and a length here) are words in memory, at RAX
+   or X4. The recorded thread's first mark of a secret begins the
+   trace */
+static void on_request(unsigned int vcpu, void *udata) {
+  uint64_t args, req = 0, len = 0;
+  (void)udata;
+  if (vcpu != recorded || begun) return;
+  args = read_gpr(aarch64 ? 4 : RAX);
+  g_byte_array_set_size(regbuf, 0);
+  if (!qemu_plugin_read_memory_vaddr(args, regbuf, 24)) return;
+  memcpy(&req, regbuf->data, sizeof req);
+  memcpy(&len, regbuf->data + 16, sizeof len);
+  if (req == MAKE_MEM_UNDEFINED && len > 0) begin();
+}
+
 static void on_divide(unsigned int vcpu, void *udata) {
   Insn *i = udata;
   uint64_t mask = i->d.width == 64 ? ~0ULL : (1ULL << i->d.width) - 1;
-  (void)vcpu;
+  if (vcpu != recorded) return;
   if (aarch64) {
     mix(i, read_gpr(i->d.a) & mask);
     mix(i, read_gpr(i->d.b) & mask);
@@ -376,7 +463,7 @@ static void on_divide(unsigned int vcpu, void *udata) {
 static void on_outside(unsigned int vcpu, void *udata) {
   Insn *i = udata;
   const Watch *w = i->watch;
-  (void)vcpu;
+  if (vcpu != recorded) return;
   for (int k = 0; k < w->nregs; k++) {
     int n, from = w->low[k] / 8, to = (w->low[k] + w->width[k]) / 8;
     g_byte_array_set_size(regbuf, 0);
@@ -393,7 +480,7 @@ static void on_outside(unsigned int vcpu, void *udata) {
 static void on_mem(unsigned int vcpu, qemu_plugin_meminfo_t info,
                    uint64_t vaddr, void *udata) {
   Insn *i = udata;
-  (void)vcpu;
+  if (vcpu != recorded) return;
   i->fingerprint = (i->fingerprint ^ vaddr) * fnv_prime;
   i->accesses++;
   if (i->last != current) note_context(i);
@@ -462,32 +549,150 @@ static void find_registers(void) {
   }
 }
 
+#define WAIT_SECONDS 10
+
+/* another thread, before it runs: it waits while the recorded one
+   runs alone */
+static void take_turn(void) {
+  g_mutex_lock(&turns);
+  while (alone && !gone) g_cond_wait(&turned, &turns);
+  running++;
+  counted = TRUE;
+  g_mutex_unlock(&turns);
+}
+
+/* the recorded thread, leaving a call that waits: it goes on once
+   each other thread is blocked, waiting, or gone */
+static void run_alone(void) {
+  gint64 end = g_get_monotonic_time() + WAIT_SECONDS * G_TIME_SPAN_SECOND;
+  g_mutex_lock(&turns);
+  while (running > 0)
+    if (!g_cond_wait_until(&turned, &turns, end)) {
+      if (!warned)
+        fprintf(stderr, "vestigia-qemu: a thread did not block within "
+                "%d seconds; the recorded thread went on beside it\n",
+                WAIT_SECONDS);
+      warned = TRUE;
+      break;
+    }
+  alone = TRUE;
+  g_mutex_unlock(&turns);
+}
+
+/* the system calls that may wait, by the guest's numbers: a futex
+   wait, a sleep, a yield, a poll, a wait for a child or a signal */
+static gboolean call_waits(int64_t num, uint64_t a2) {
+  static const int64_t x86_64[] = { 7, 23, 24, 34, 35, 61, 128, 130,
+                                    230, 232, 247, 270, 271, 281, 441,
+                                    449 };
+  static const int64_t a64[] = { 22, 72, 73, 95, 101, 115, 124, 133,
+                                 137, 260, 441, 449 };
+  const int64_t *t = aarch64 ? a64 : x86_64;
+  size_t n = aarch64 ? G_N_ELEMENTS(a64) : G_N_ELEMENTS(x86_64);
+  if (num == (aarch64 ? 98 : 202)) {
+    /* FUTEX_WAIT, LOCK_PI, WAIT_BITSET, WAIT_REQUEUE_PI, LOCK_PI2 */
+    uint64_t cmd = a2 & 127;
+    return cmd == 0 || cmd == 6 || cmd == 9 || cmd == 11 || cmd == 13;
+  }
+  for (size_t k = 0; k < n; k++)
+    if (t[k] == num) return TRUE;
+  return FALSE;
+}
+
+static gboolean call_exits(int64_t num) {
+  return num == (aarch64 ? 93 : 60);
+}
+
+static void on_syscall(qemu_plugin_id_t id, unsigned int vcpu,
+                       int64_t num, uint64_t a1, uint64_t a2,
+                       uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
+                       uint64_t a7, uint64_t a8) {
+  (void)id;
+  (void)a1;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  (void)a6;
+  (void)a7;
+  (void)a8;
+  waits = call_waits(num, a2);
+  if (!waits && !call_exits(num)) return;
+  g_mutex_lock(&turns);
+  if (vcpu == recorded) {
+    alone = FALSE;
+    if (call_exits(num)) gone = TRUE;
+  } else if (counted) {
+    running--;
+    counted = FALSE;
+  }
+  g_cond_broadcast(&turned);
+  g_mutex_unlock(&turns);
+}
+
+static void on_syscall_ret(qemu_plugin_id_t id, unsigned int vcpu,
+                           int64_t num, int64_t ret) {
+  (void)id;
+  (void)num;
+  (void)ret;
+  if (!waits) return;
+  waits = FALSE;
+  if (vcpu == recorded) run_alone();
+  else take_turn();
+}
+
+/* the first vCPU is the program's own thread, which is recorded; any
+   other takes its turn before it runs on */
 static void on_vcpu_init(qemu_plugin_id_t id, unsigned int vcpu) {
   (void)id;
-  (void)vcpu;
-  if (g_atomic_int_add(&vcpus, 1) == 0)
+  if (g_atomic_int_add(&vcpus, 1) == 0) {
+    recorded = vcpu;
     find_registers();
-  else {
-    FILE *out = fopen(out_path, "w");
-    if (out != NULL) {
-      fprintf(out, "T 2\n");
-      fclose(out);
-    }
-    fprintf(stderr, "vestigia-qemu: the guest started a second thread, "
-            "which a trace cannot record; the run is stopped\n");
-    _exit(EXIT_FAILURE);
-  }
+  } else
+    take_turn();
 }
 
 static const Watch *watched(uintptr_t haddr);
 
+/* valgrind's client request, as its headers make it: four rotations
+   of a register that leave it as it was, then an instruction that
+   does nothing, the request's marker */
+static const uint8_t request_x86_64[] = {
+  0x48, 0xc1, 0xc7, 0x03, 0x48, 0xc1, 0xc7, 0x0d, /* rol $3, $13 rdi */
+  0x48, 0xc1, 0xc7, 0x3d, 0x48, 0xc1, 0xc7, 0x33, /* rol $61, $51 */
+  0x48, 0x87, 0xdb };                             /* xchg rbx, rbx */
+static const uint32_t request_aarch64[] = {
+  0x93cc0d8c, 0x93cc358c, /* ror x12, x12, #3, #13 */
+  0x93cccd8c, 0x93ccf58c, /* ror x12, x12, #51, #61 */
+  0xaa0a014a };           /* orr x10, x10, x10 */
+
+/* whether the bytes a block has so far end in a client request,
+   its marker the instruction just added, of len bytes */
+static gboolean ends_request(const uint8_t *tail, size_t n, size_t len) {
+  const uint8_t *r = aarch64 ? (const uint8_t *)request_aarch64
+                             : request_x86_64;
+  size_t m = aarch64 ? sizeof request_aarch64 : sizeof request_x86_64;
+  return len == (aarch64 ? 4u : 3u) && n >= m
+    && memcmp(tail + n - m, r, m) == 0;
+}
+
 static void on_translate(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
   size_t n = qemu_plugin_tb_n_insns(tb);
+  uint8_t tail[32];
+  size_t tn = 0;
   (void)id;
+  g_mutex_lock(&translating);
   for (size_t k = 0; k < n; k++) {
     struct qemu_plugin_insn *qi = qemu_plugin_tb_get_insn(tb, k);
     uint8_t bytes[16];
     size_t len = qemu_plugin_insn_data(qi, bytes, sizeof bytes);
+    /* the block's last bytes, for a client request's */
+    if (tn + len > sizeof tail) {
+      size_t keep = sizeof tail - len;
+      memmove(tail, tail + tn - keep, keep);
+      tn = keep;
+    }
+    memcpy(tail + tn, bytes, len);
+    tn += len;
     Insn *i = insn_at(qemu_plugin_insn_vaddr(qi),
                       qemu_plugin_insn_size(qi),
                       (uintptr_t)qemu_plugin_insn_haddr(qi),
@@ -506,6 +711,9 @@ static void on_translate(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
       i->origin = 1;
     qemu_plugin_register_vcpu_insn_exec_cb(qi, on_exec,
                                            QEMU_PLUGIN_CB_NO_REGS, i);
+    if (ends_request(tail, tn, len))
+      qemu_plugin_register_vcpu_insn_exec_cb(qi, on_request,
+                                             QEMU_PLUGIN_CB_R_REGS, i);
     if (i->d.kind == DIVISION)
       qemu_plugin_register_vcpu_insn_exec_cb(qi, on_divide,
                                              QEMU_PLUGIN_CB_R_REGS, i);
@@ -515,6 +723,7 @@ static void on_translate(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
     qemu_plugin_register_vcpu_mem_cb(qi, on_mem, QEMU_PLUGIN_CB_NO_REGS,
                                      QEMU_PLUGIN_MEM_RW, i);
   }
+  g_mutex_unlock(&translating);
 }
 
 /* the host's file-backed mappings, for naming an instruction's file */
@@ -725,6 +934,8 @@ static gboolean read_watches(const char *path) {
   return ok;
 }
 
+/* QEMU removes every other callback before this one, so no thread
+   touches the tables while they are written out */
 static void at_exit(qemu_plugin_id_t id, void *p) {
   (void)id;
   (void)p;
@@ -740,6 +951,9 @@ static void at_exit(qemu_plugin_id_t id, void *p) {
   g_hash_table_iter_init(&it, insns);
   while (g_hash_table_iter_next(&it, &key, &val)) {
     Insn *i = val;
+    /* made, but not run by the recorded thread since the trace
+       began: another thread's, or what ran before it */
+    if (i->count == 0) continue;
     const Region *r = region_of(rs, i->haddr);
     Segments *s = r != NULL ? segments_of(segs, r->path) : NULL;
     uint64_t addr;
@@ -778,6 +992,7 @@ static void at_exit(qemu_plugin_id_t id, void *p) {
     fprintf(out, "C %x %" PRIx32 " %" PRIx64 "\n", k, c->caller,
             c->call);
   }
+  fprintf(out, "T %x\n", (unsigned)g_atomic_int_get(&vcpus));
   fclose(out);
 }
 
@@ -812,6 +1027,8 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
     g_array_append_val(contexts, own);
   }
   qemu_plugin_register_vcpu_init_cb(id, on_vcpu_init);
+  qemu_plugin_register_vcpu_syscall_cb(id, on_syscall);
+  qemu_plugin_register_vcpu_syscall_ret_cb(id, on_syscall_ret);
   qemu_plugin_register_vcpu_tb_trans_cb(id, on_translate);
   qemu_plugin_register_atexit_cb(id, at_exit, NULL);
   return 0;

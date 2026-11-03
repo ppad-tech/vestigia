@@ -88,7 +88,8 @@ different number of times are reported as downstream.
 `record` disables address-space randomisation and seeds the guest's
 entropy so that runs lay memory out alike, and starts each run in a
 PID namespace of its own (util-linux `unshare`, unprivileged user
-namespaces) so that every run sees one pid. `diff` refuses runs whose
+namespaces) so that every run sees one pid. Each guest thread reads
+a clock of its own, advanced by its readings. `diff` refuses runs whose
 program, argument shape, environment size, or object layout differ.
 
 ### Contracts
@@ -127,7 +128,15 @@ vestigia.lib.x86_64-linux.diffOf {
   Use both.
 * valgrind and QEMU user mode run on Linux only. `record` runs x86_64
   or aarch64 harnesses on either host; memcheck needs a native one.
-* `record` stops a guest that starts a second thread.
+* `record` records the program's own thread alone: code under audit
+  must run on the thread its main function does. Other threads (a
+  runtime's collector or scheduler) run unrecorded, and only while
+  it waits in a system call; it goes on once they all wait too. A
+  thread that never blocks holds it back ten seconds at most.
+* A differential trace begins at the first secret mark: what ran
+  before it is set aside. A harness marks the secret before the call
+  under audit, and does nothing with it after marking that is not
+  the call's.
 * A guest reading `/dev/urandom` reads the host's.
 * An address origin may be a layout moved by an earlier secret
   branch, rather than an address computed from the secret.

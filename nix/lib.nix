@@ -27,8 +27,10 @@ let
   # instruction, and the QEMU that runs a harness under it, for
   # either ISA, whatever the host's: user mode alone, its guest's
   # getrandom drawn from the generator -seed fixes
-  # (qemu-getrandom.patch), and an Arm CPU without the cryptographic
-  # extension to be had (crypto=off, qemu-crypto.patch)
+  # (qemu-getrandom.patch), an Arm CPU without the cryptographic
+  # extension to be had (crypto=off, qemu-crypto.patch), and its
+  # clocks each thread's own, advanced by its readings
+  # (qemu-clock.patch)
   qemu = (pkgs.qemu.override {
     userOnly = true;
     hostCpuTargets = [ "x86_64-linux-user" "aarch64-linux-user" ];
@@ -36,6 +38,7 @@ let
     patches = (o.patches or [ ]) ++ [
       ./qemu-getrandom.patch
       ./qemu-crypto.patch
+      ./qemu-clock.patch
     ];
   });
   plugin = pkgs.runCommandCC "vestigia-qemu-plugin" {
