@@ -74,6 +74,13 @@
  *
  * the number of threads the guest started, its own among them.
  *
+ * The trace begins where the recorded thread first marks a secret:
+ * where it makes memcheck's client request MAKE_MEM_UNDEFINED, as a
+ * harness's vestigia_secret does, before the code under audit is
+ * called. What ran before it (a runtime coming up, a harness reading
+ * its arguments) is set aside, since no secret it could depend on
+ * was yet handed over. A run that never marks one is recorded whole.
+ *
  * One guest thread is recorded: the program's own, the first, on
  * which its main function runs. Other threads (a language runtime's
  * collector and scheduler, say) run unrecorded, their instructions
@@ -182,6 +189,7 @@ static int running;         /* other threads not blocked, nor waiting */
 static gboolean warned;     /* a wait for the others timed out */
 static __thread gboolean waits; /* this thread's call is one that waits */
 static __thread gboolean counted; /* this thread is among `running` */
+static gboolean begun;      /* a secret has been marked: the trace began */
 static gboolean aarch64;  /* the guest's ISA: aarch64, else x86_64 */
 static GArray *contexts;  /* Context by number, 0 the program's own */
 static GHashTable *interned; /* Context -> its number */
@@ -365,6 +373,35 @@ static void on_exec(unsigned int vcpu, void *udata) {
   if (i->origin && i->last != current) note_context(i);
 }
 
+/* what has been recorded set aside: the trace begins anew. Other
+   threads may be making instructions, so under their lock */
+static void begin(void) {
+  GHashTableIter it;
+  gpointer key, val;
+  begun = TRUE;
+  g_mutex_lock(&translating);
+  g_hash_table_iter_init(&it, insns);
+  while (g_hash_table_iter_next(&it, &key, &val)) {
+    Insn *i = val;
+    i->count = 0;
+    i->accesses = 0;
+    i->fingerprint = fnv_offset;
+    i->order = fnv_offset;
+    i->operands = fnv_offset;
+    g_hash_table_remove_all(i->succ);
+    i->last = UINT32_MAX;
+    i->ncontexts = 0;
+    i->partial = 0;
+    i->made_in = UINT32_MAX;
+  }
+  g_mutex_unlock(&translating);
+  g_array_set_size(contexts, 1);
+  g_hash_table_remove_all(interned);
+  g_array_set_size(calls, 0);
+  current = 0;
+  prev = NULL;
+}
+
 static void mix(Insn *i, uint64_t v) {
   i->operands = (i->operands ^ v) * fnv_prime;
 }
@@ -378,6 +415,26 @@ static uint64_t read_gpr(int r) {
   /* in the guest's byte order, little-endian as the host's */
   if (n > 0) memcpy(&v, regbuf->data, MIN((size_t)n, sizeof v));
   return v;
+}
+
+/* memcheck's request MAKE_MEM_UNDEFINED, VG_USERREQ_TOOL_BASE('M','C')
+   + 1 */
+#define MAKE_MEM_UNDEFINED 0x4d430001
+
+/* a client request made: its arguments (the request, then what it
+   takes: an address and a length here) are words in memory, at RAX
+   or X4. The recorded thread's first mark of a secret begins the
+   trace */
+static void on_request(unsigned int vcpu, void *udata) {
+  uint64_t args, req = 0, len = 0;
+  (void)udata;
+  if (vcpu != recorded || begun) return;
+  args = read_gpr(aarch64 ? 4 : RAX);
+  g_byte_array_set_size(regbuf, 0);
+  if (!qemu_plugin_read_memory_vaddr(args, regbuf, 24)) return;
+  memcpy(&req, regbuf->data, sizeof req);
+  memcpy(&len, regbuf->data + 16, sizeof len);
+  if (req == MAKE_MEM_UNDEFINED && len > 0) begin();
 }
 
 static void on_divide(unsigned int vcpu, void *udata) {
@@ -595,14 +652,46 @@ static void on_vcpu_init(qemu_plugin_id_t id, unsigned int vcpu) {
 
 static const Watch *watched(uintptr_t haddr);
 
+/* valgrind's client request, as its headers make it: four rotations
+   of a register that leave it as it was, then an instruction that
+   does nothing, the request's marker */
+static const uint8_t request_x86_64[] = {
+  0x48, 0xc1, 0xc7, 0x03, 0x48, 0xc1, 0xc7, 0x0d, /* rol $3, $13 rdi */
+  0x48, 0xc1, 0xc7, 0x3d, 0x48, 0xc1, 0xc7, 0x33, /* rol $61, $51 */
+  0x48, 0x87, 0xdb };                             /* xchg rbx, rbx */
+static const uint32_t request_aarch64[] = {
+  0x93cc0d8c, 0x93cc358c, /* ror x12, x12, #3, #13 */
+  0x93cccd8c, 0x93ccf58c, /* ror x12, x12, #51, #61 */
+  0xaa0a014a };           /* orr x10, x10, x10 */
+
+/* whether the bytes a block has so far end in a client request,
+   its marker the instruction just added, of len bytes */
+static gboolean ends_request(const uint8_t *tail, size_t n, size_t len) {
+  const uint8_t *r = aarch64 ? (const uint8_t *)request_aarch64
+                             : request_x86_64;
+  size_t m = aarch64 ? sizeof request_aarch64 : sizeof request_x86_64;
+  return len == (aarch64 ? 4u : 3u) && n >= m
+    && memcmp(tail + n - m, r, m) == 0;
+}
+
 static void on_translate(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
   size_t n = qemu_plugin_tb_n_insns(tb);
+  uint8_t tail[32];
+  size_t tn = 0;
   (void)id;
   g_mutex_lock(&translating);
   for (size_t k = 0; k < n; k++) {
     struct qemu_plugin_insn *qi = qemu_plugin_tb_get_insn(tb, k);
     uint8_t bytes[16];
     size_t len = qemu_plugin_insn_data(qi, bytes, sizeof bytes);
+    /* the block's last bytes, for a client request's */
+    if (tn + len > sizeof tail) {
+      size_t keep = sizeof tail - len;
+      memmove(tail, tail + tn - keep, keep);
+      tn = keep;
+    }
+    memcpy(tail + tn, bytes, len);
+    tn += len;
     Insn *i = insn_at(qemu_plugin_insn_vaddr(qi),
                       qemu_plugin_insn_size(qi),
                       (uintptr_t)qemu_plugin_insn_haddr(qi),
@@ -621,6 +710,9 @@ static void on_translate(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
       i->origin = 1;
     qemu_plugin_register_vcpu_insn_exec_cb(qi, on_exec,
                                            QEMU_PLUGIN_CB_NO_REGS, i);
+    if (ends_request(tail, tn, len))
+      qemu_plugin_register_vcpu_insn_exec_cb(qi, on_request,
+                                             QEMU_PLUGIN_CB_R_REGS, i);
     if (i->d.kind == DIVISION)
       qemu_plugin_register_vcpu_insn_exec_cb(qi, on_divide,
                                              QEMU_PLUGIN_CB_R_REGS, i);
