@@ -5,6 +5,22 @@
     thread alone, the one its main function runs on; the others run
     unrecorded. The plugin appends how many threads ran, and `diff`
     reports the most any run started (`threads`).
+  * The recorded thread runs alone: the others run only while it
+    waits in a system call (a futex wait, a sleep, a yield, a poll),
+    and it goes on once each of them waits too, or has ended, so
+    that what they leave in memory it shares is the same in every
+    run. A thread that never blocks holds it back ten seconds at
+    most, noted on standard error.
+  * The guest's clocks are each thread's own, advancing a
+    microsecond at each reading from a fixed start
+    (qemu-clock.patch): a guest deciding by time decides alike in
+    every run.
+  * A differential trace begins at the recorded thread's first
+    secret mark (memcheck's MAKE_MEM_UNDEFINED, which the plugin
+    knows by its instructions); what ran before it is set aside. A
+    run that never marks one is recorded whole.
+  * memcheck's leak summary is passed over unread: valgrind 3.26
+    leaves it unclosed for a Go library's run.
 
 - 0.2.1 (2026-11-02)
   * `record` starts each run in a PID namespace of its own, so that
