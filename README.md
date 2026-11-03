@@ -115,7 +115,10 @@ vestigia.lib.x86_64-linux.diffOf {
 }
 ```
 
-`nix/lib.nix` provides the same for a consumer's own nixpkgs.
+Either takes an `env` set for every run: a runtime that reads its
+settings as it starts (Go's `GOMAXPROCS` and `GOGC`, say) is given them
+there, as nothing the harness runs can set them in time. `nix/lib.nix`
+provides the same for a consumer's own nixpkgs.
 
 ## Caveats
 
