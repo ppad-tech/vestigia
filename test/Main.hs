@@ -567,11 +567,9 @@ symbolTests = testGroup "symbol"
             , (0x5678, [ Place Nothing Nothing Nothing ]) ]
 
   , testCase "a legacy Rust name's escapes and hash undone" $ do
-      rustLegacy "decaf377::ark_curve::encoding::_$LT$impl$u20$decaf377\
-                 \..ark_curve..element..projective..Element$GT$::vartime\
-                 \_compress_to_field::h346fee1681a4f34f"
-        @?= "decaf377::ark_curve::encoding::<impl decaf377::ark_curve::\
-            \element::projective::Element>::vartime_compress_to_field"
+      rustLegacy "core::fmt::num::imp::_$LT$impl$u20$core..fmt..Display\
+                 \$u20$for$u20$u64$GT$::fmt::h8f2a6c1e9b3d7054"
+        @?= "core::fmt::num::imp::<impl core::fmt::Display for u64>::fmt"
       rustLegacy "_$LT$$RF$T$u20$as$u20$core..fmt..Debug$GT$::fmt::\
                  \h0123456789abcdef"
         @?= "<&T as core::fmt::Debug>::fmt"

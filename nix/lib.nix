@@ -3,9 +3,9 @@
 # plugin, the harness-side headers, and the functions that run a
 # harness under either instrument as a derivation.
 #
-# The flake applies it per system; a consumer pinning vestigia (as
-# synthesis does) imports it with its own package set, so a trace is
-# built by the same definitions wherever it is built.
+# The flake applies it per system; a consumer pinning vestigia
+# imports it with its own package set, so a trace is built by the
+# same definitions wherever it is built.
 { pkgs, src ? ../. }:
 
 let
